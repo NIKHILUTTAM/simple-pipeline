@@ -3,6 +3,17 @@ name: Auto-Healing Pipeline
 on:
   push:
     branches: [ main ]
+    - id: deploy_step
+      name: Deploy to Vercel
+      run: |
+        set +e
+        vercel link --token ${{ secrets.VERCEL_TOKEN }} --yes --project simple-pipeline
+        DEPLOY_OUTPUT=$(vercel --prod --token ${{ secrets.VERCEL_TOKEN }} 2>&1)
+        EXIT_CODE=$?
+        echo "vercel_exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+        echo "$DEPLOY_OUTPUT" > deploy.log
+        set -e
+
 
 jobs:
   deploy:
