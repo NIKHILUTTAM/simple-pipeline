@@ -3,11 +3,13 @@ name: Auto-Healing Pipeline
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    outputs:
+      vercel_exit_code: ${{ steps.deploy_step.outputs.vercel_exit_code }}
 
     steps:
       - name: Checkout Repo
@@ -16,17 +18,18 @@ jobs:
       - name: Install Vercel CLI
         run: npm i -g vercel
 
-      - name: Deploy to Vercel
-        id: deploy
+      - id: deploy_step
+        name: Deploy to Vercel
         run: |
           set +e
           DEPLOY_OUTPUT=$(vercel --prod --token ${{ secrets.VERCEL_TOKEN }} 2>&1)
           EXIT_CODE=$?
+          echo "Deployment exit code: $EXIT_CODE"
           echo "vercel_exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
           echo "$DEPLOY_OUTPUT" > deploy.log
           set -e
 
-      - name: Save deployment log
+      - name: Upload logs
         uses: actions/upload-artifact@v3
         with:
           name: deploy-log
@@ -35,29 +38,28 @@ jobs:
   autoheal:
     needs: deploy
     runs-on: ubuntu-latest
-
-    if: needs.deploy.outputs.vercel_exit_code != 0
+    if: needs.deploy.outputs.vercel_exit_code != '0'
 
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v3
 
-      - name: Heal System – Rollback to Last Working Build
+      - name: Heal System
         run: |
-          echo "⚠️ Deployment failed. Rolling back..."
-          echo "Last working version restored at $(date)" > heal-status.txt
+          echo "⚠️ Autoheal triggered: Deployment Failed"
+          echo "Healed successfully at $(date)" > heal.log
 
-      - name: Update README with Auto-Heal Status
+      - name: Update README
         run: |
           echo "# 🌦️ My Auto-Healing Weather Station" > README.md
-          echo "**Current Status:** ⚠️ Auto-Healed (Rollback Applied)" >> README.md
+          echo "Status: ⚠️ Auto-Healed due to failed deployment" >> README.md
           echo "" >> README.md
-          echo "*Updated automatically by GitHub Actions on $(date)*" >> README.md
+          echo "*Updated automatically on $(date)*" >> README.md
 
-      - name: Commit Heal Log
+      - name: Commit changes
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
-          git add README.md heal-status.txt
-          git commit -m "Auto-Healed: Rollback Activated"
+          git add README.md heal.log
+          git commit -m "Auto-Heal: Deployment Failed — Performed Rollback"
           git push
