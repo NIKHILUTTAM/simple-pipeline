@@ -3,18 +3,68 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Pipeline Project</title>
-    <link rel="stylesheet" href="style.css">
+    <title>JS Auto-Healing</title>
+    <style>
+        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f0f2f5; }
+        .card { background: white; padding: 2rem; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; }
+        .status { padding: 10px; border-radius: 5px; margin-top: 10px; display: inline-block; font-weight: bold; }
+        
+        /* Different Colors for Different States */
+        .loading { background-color: #e2e3e5; color: #383d41; }
+        .success { background-color: #d4edda; color: #155724; }
+        .healed { background-color: #fff3cd; color: #856404; border: 2px solid #ffecb5; }
+    </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🚀 Pipeline Status</h1>
-        <div class="card">
-            <p><strong>Deployment:</strong> <span class="status success">Active</span></p>
-            <p><strong>Source:</strong> GitHub</p>
-            <p><strong>Host:</strong> Vercel</p>
-            <p id="update-msg">This was deployed automatically!</p>
-        </div>
+
+    <div class="card">
+        <h1>⚡ Live System Monitor</h1>
+        <p>Checking API Status...</p>
+        <div id="status-box" class="status loading">⏳ Connecting...</div>
+        <p id="log" style="font-size: 0.8rem; color: #666; margin-top: 20px;"></p>
     </div>
+
+    <script>
+        // simulateAPI is a fake function that fails 50% of the time
+        async function simulateAPI() {
+            return new Promise((resolve, reject) => {
+                setTimeout(() => {
+                    const isStable = Math.random() > 0.5; // 50/50 chance
+                    if (isStable) {
+                        resolve("System Normal (25ms)");
+                    } else {
+                        reject("Connection Timeout (Error 500)");
+                    }
+                }, 1000); // Fake delay of 1 second
+            });
+        }
+
+        async function runSystemCheck() {
+            const statusBox = document.getElementById("status-box");
+            const log = document.getElementById("log");
+
+            try {
+                // 1. Try to get data
+                const result = await simulateAPI();
+                
+                // 2. If successful, show Green
+                statusBox.textContent = "✅ " + result;
+                statusBox.className = "status success";
+                log.textContent = "Data fetched successfully from primary API.";
+
+            } catch (error) {
+                // 3. IF IT CRASHES -> AUTO-HEAL HERE
+                console.warn("Primary API Failed. Healing...");
+                
+                statusBox.textContent = "🛡️ System Healed (Backup Mode)";
+                statusBox.className = "status healed";
+                log.textContent = `Error detected: "${error}". Switched to cached data automatically.`;
+            }
+        }
+
+        // Run the check when page loads
+        runSystemCheck();
+    </script>
+
 </body>
 </html>
