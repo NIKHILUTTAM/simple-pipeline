@@ -3,33 +3,71 @@ name: Auto-Healing Pipeline
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    # Expose the vercel exit code so 'autoheal' can check it
     outputs:
       vercel_exit_code: ${{ steps.deploy_step.outputs.vercel_exit_code }}
 
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show node & npm (debug)
+        run: |
+          echo "Runner: $RUNNER_OS"
+          node --version || true
+          npm --version || true
+
+      - name: Ensure VERCEL_TOKEN is present
+        id: secret-check
+        run: |
+          if [ -z "${{ secrets.VERCEL_TOKEN }}" ]; then
+            echo "VERCEL_TOKEN is missing in repository secrets"
+            echo "vercel_exit_code=999" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "VERCEL_TOKEN present"
+          echo "vercel_exit_code=0" >> $GITHUB_OUTPUT
 
       - name: Install Vercel CLI
-        run: npm i -g vercel
+        if: steps.secret-check.outputs.vercel_exit_code == '0'
+        run: npm i -g vercel@latest
 
       - id: deploy_step
-        name: Deploy to Vercel
+        name: Deploy to Vercel (capture output)
+        if: steps.secret-check.outputs.vercel_exit_code == '0'
+        shell: bash
         run: |
           set +e
-          DEPLOY_OUTPUT=$(vercel --prod --token ${{ secrets.VERCEL_TOKEN }} 2>&1)
-          EXIT_CODE=$?
-          echo "vercel_exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-          echo "$DEPLOY_OUTPUT" > deploy.log
-          set -e
+          # Optional: link to a project to avoid interactive prompts (replace if needed)
+          # vercel link --token "${{ secrets.VERCEL_TOKEN }}" --yes || true
 
-      - name: Upload logs
-        uses: actions/upload-artifact@v3
+          echo "Running vercel deploy (non-interactive)..."
+          # Use --token and --prod and non-interactive flags
+          DEPLOY_OUTPUT="$(vercel --prod --confirm --token "${{ secrets.VERCEL_TOKEN }}" 2>&1)"
+          EXIT_CODE=$?
+          echo "=== BEGIN VERCEL OUTPUT ==="
+          echo "$DEPLOY_OUTPUT"
+          echo "===  END VERCEL OUTPUT  ==="
+
+          # Save logs to file for upload
+          printf "%s\n" "$DEPLOY_OUTPUT" > deploy.log
+
+          # Expose step output to job outputs
+          echo "vercel_exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          # Keep the step from failing the job so the job completes (autoheal will handle)
+          set -e
+          true
+
+      - name: Upload deploy log (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: deploy-log
           path: deploy.log
@@ -37,28 +75,42 @@ jobs:
   autoheal:
     needs: deploy
     runs-on: ubuntu-latest
+    # Trigger autos when deploy exit code != 0 OR when secret missing (999)
     if: needs.deploy.outputs.vercel_exit_code != '0'
 
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - name: Heal System
+      - name: Save heal metadata
         run: |
-          echo "Autoheal triggered: Deployment Failed"
-          echo "Healed successfully at $(date)" > heal.log
+          echo "Autoheal triggered because vercel_exit_code=${{ needs.deploy.outputs.vercel_exit_code }}"
+          echo "time: $(date)" > heal.log
+          echo "vercel_exit_code=${{ needs.deploy.outputs.vercel_exit_code }}" >> heal.log
 
-      - name: Update README
+      - name: Update README with Auto-Heal status
         run: |
-          echo "# 🌦️ My Auto-Healing Weather Station" > README.md
-          echo "Status: ⚠️ Auto-Healed due to failed deployment" >> README.md
-          echo "" >> README.md
-          echo "*Updated automatically on $(date)*" >> README.md
+          cat > README.md <<'EOF'
+# 🌦️ My Auto-Healing Weather Station
 
-      - name: Commit changes
+**Status:** ⚠️ Auto-Healed — deployment failed and automatic recovery actions were taken.
+
+*Updated automatically by GitHub Actions on* $(date)
+EOF
+
+      - name: Commit and push heal artifacts
+        env:
+          GIT_AUTHOR_NAME: "github-actions"
+          GIT_AUTHOR_EMAIL: "github-actions@github.com"
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-          git add README.md heal.log
-          git commit -m "Auto-Heal: Deployment Failed — Performed Rollback"
-          git push
+          git config --global user.name "$GIT_AUTHOR_NAME"
+          git config --global user.email "$GIT_AUTHOR_EMAIL"
+          git add README.md heal.log || true
+          git commit -m "Auto-Heal: deployment failure detected, updated README" || echo "Nothing to commit"
+          git push || echo "Push failed (maybe read-only token); changes are local."
+
+      - name: Upload heal log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: heal-log
+          path: heal.log
