@@ -1,59 +1,147 @@
-name: Auto-Healing Pipeline
+name: Auto-Healing Pipeline (deploy + scheduled monitor)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
+  schedule:
+    # every 5 minutes (adjust if you want less frequent)
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+env:
+  SITE_URL: "https://simple-pipeline.vercel.app"
+  RETRIES: 3
+  RETRY_SLEEP: 8
 
 jobs:
-  deploy:
+  # Health check job always runs quickly and produces an output 'trigger_deploy'
+  health-check:
     runs-on: ubuntu-latest
     outputs:
-      vercel_exit_code: ${{ steps.deploy_step.outputs.vercel_exit_code }}
-
+      trigger_deploy: ${{ steps.decide.outputs.trigger_deploy }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Decide whether to run health check or skip (fast on push)
+        id: decide
+        run: |
+          # If this workflow was triggered by a push, we do not need a separate health-check to trigger deploy.
+          # The 'deploy' job will run because it's a push.
+          echo "Event: $GITHUB_EVENT_NAME"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "trigger_deploy=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Otherwise (schedule or manual), perform a real HTTP GET to SITE_URL
+          echo "Checking ${SITE_URL} ..."
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${SITE_URL}" || echo "000")
+          echo "http_code=$CODE"
+          if [ "$CODE" = "200" ]; then
+            echo "trigger_deploy=false" >> $GITHUB_OUTPUT
+          else
+            echo "trigger_deploy=true" >> $GITHUB_OUTPUT
+          fi
+
+  # Deploy job runs on push OR when health-check requested a redeploy
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [health-check]
+    outputs:
+      vercel_exit_code: ${{ steps.deploy_step.outputs.vercel_exit_code }}
+    # Run when triggered by push OR when the health-check indicated a problem
+    if: ${{ github.event_name == 'push' || needs.health-check.outputs.trigger_deploy == 'true' }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Show context
+        run: |
+          echo "Workflow event: $GITHUB_EVENT_NAME"
+          echo "Health-check requested redeploy: ${{ needs.health-check.outputs.trigger_deploy }}"
 
       - name: Install Vercel CLI
-        run: npm install -g vercel
+        run: npm install -g vercel@latest
 
       - id: deploy_step
-        name: Deploy to Vercel (static)
+        name: Deploy to Vercel (with retries)
+        shell: bash
         run: |
           set +e
-          vercel pull --yes --token ${{ secrets.VERCEL_TOKEN }}
-          vercel build --token ${{ secrets.VERCEL_TOKEN }}
-          vercel deploy --prod --prebuilt --token ${{ secrets.VERCEL_TOKEN }}
-          EXIT_CODE=$?
-          echo "vercel_exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-          set -e
+          attempt=1
+          success=1
+          > deploy_output.txt
+          while [ $attempt -le ${RETRIES} ]; do
+            echo "Attempt #$attempt: vercel --prod --confirm --token <secret>"
+            OUTPUT=$(vercel --prod --confirm --token "${{ secrets.VERCEL_TOKEN }}" 2>&1) || true
+            CODE=$?
+            printf "\n=== ATTEMPT %d ===\nExitCode: %d\n%s\n" "$attempt" "$CODE" "$OUTPUT" >> deploy_output.txt
+            if [ "$CODE" -eq 0 ]; then
+              echo "vercel_exit_code=0" >> $GITHUB_OUTPUT
+              success=0
+              break
+            else
+              echo "Attempt $attempt failed with code $CODE; sleeping ${RETRY_SLEEP}s"
+              sleep ${RETRY_SLEEP}
+            fi
+            attempt=$((attempt+1))
+          done
 
+          if [ $success -ne 0 ]; then
+            # last exit code from vercel stored in $CODE
+            echo "vercel_exit_code=$CODE" >> $GITHUB_OUTPUT
+            # keep step from failing so autoheal job can run
+            exit 0
+          fi
+
+      - name: Upload deploy log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-log
+          path: deploy_output.txt
+
+  # Auto-heal job runs only when deploy produced a non-zero exit code
   autoheal:
-    runs-on: ubuntu-latest
     needs: deploy
+    runs-on: ubuntu-latest
     if: needs.deploy.outputs.vercel_exit_code != '0'
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - name: Auto-Heal Triggered
+      - name: Record heal metadata
         run: |
-          echo "Auto-heal triggered because deploy failed"
-          echo "Heal log at $(date)" > heal.log
+          echo "Auto-heal triggered at: $(date)" > heal.log
+          echo "site: ${SITE_URL}" >> heal.log
+          echo "vercel_exit_code=${{ needs.deploy.outputs.vercel_exit_code }}" >> heal.log
 
-      - name: Update README
+      - name: Update README with Auto-Heal Status
         run: |
-          echo "# Auto-Healing Weather Station" > README.md
-          echo "🚑 Deployment failed — Auto-heal executed" >> README.md
-          echo "" >> README.md
-          echo "Updated: $(date)" >> README.md
+          cat > README.md <<EOF
+# 🌦️ Auto-Heal: Emergency Recovery
 
-      - name: Commit changes
+A site outage was detected at $(date).
+Auto-healing attempted ${RETRIES} redeploy(s) and failed; see heal.log for details.
+
+This file was updated automatically by GitHub Actions.
+EOF
+
+      - name: Commit README and heal.log (best-effort)
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add README.md heal.log
-          git commit -m "Auto-Heal: Deployment failed"
-          git push
+          git add README.md heal.log || true
+          git commit -m "Auto-Heal: deployment failed — recorded at $(date)" || echo "Nothing to commit"
+          git push || echo "Push failed (no permission); changes are local."
+
+      - name: Create issue for visibility (optional)
+        uses: peter-evans/create-issue-from-file@v4
+        with:
+          title: "Auto-Heal performed: site down (${SITE_URL})"
+          file: ./heal.log
+          labels: "auto-heal, incident"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: heal-log
+          path: heal.log
