@@ -1,9 +1,265 @@
-{
-  "version": 2,
-  "builds": [
-    {
-      "src": "index.html",
-      "use": "@vercel/static"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Auto-Healing Dashboard — ToDo • Weather • Query</title>
+  <style>
+    :root{
+      --bg:#f5f6fb; --card:#ffffff; --muted:#6b7280; --accent:#6A5ACD; --heal:#fff3bf; --success:#d4edda;
     }
-  ]
-}
+    *{box-sizing:border-box}
+    body{font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial; margin:0; background:var(--bg); color:#111}
+    .app{max-width:1200px;margin:28px auto;padding:18px}
+    header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+    header h1{font-size:20px;margin:0}
+    header .meta{color:var(--muted);font-size:13px}
+
+    .grid{display:grid;grid-template-columns:1fr 360px 360px;gap:18px}
+    @media (max-width:1000px){.grid{grid-template-columns:1fr 1fr;}.panel-right{grid-column:2/3}}
+    @media (max-width:700px){.grid{grid-template-columns:1fr;} .panel-right{grid-column:1/2}}
+
+    .card{background:var(--card);border-radius:12px;padding:16px;box-shadow:0 6px 18px rgba(20,20,50,0.06)}
+    .card h2{margin:0 0 12px 0;font-size:16px}
+
+    /* ToDo */
+    .todo-input{display:flex;gap:8px}
+    .todo-input input{flex:1;padding:10px;border-radius:8px;border:1px solid #e6e7f0}
+    .btn{background:var(--accent);color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer}
+    ul.tasks{list-style:none;padding:0;margin:12px 0;max-height:320px;overflow:auto}
+    ul.tasks li{display:flex;justify-content:space-between;align-items:center;padding:8px;border-radius:8px;margin-bottom:8px;background:#fafafa}
+    .task-actions button{background:transparent;border:0;color:#999;cursor:pointer;font-size:16px}
+
+    /* Weather */
+    .status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}
+    .status-normal{background:#3ccf91}
+    .status-healed{background:#f2c94c}
+    .status-error{background:#ff6b6b}
+
+    /* Chat/Query */
+    .chat{display:flex;flex-direction:column;gap:10px;height:420px}
+    .messages{flex:1;overflow:auto;padding:8px;border-radius:8px;background:#fafafa}
+    .msg{margin:8px 0;padding:8px;border-radius:8px;max-width:80%}
+    .msg.user{background:#6A5ACD;color:#fff;margin-left:auto}
+    .msg.bot{background:#eef2ff;color:#111}
+    .chat-input{display:flex;gap:8px}
+    .chat-input input{flex:1;padding:10px;border-radius:8px;border:1px solid #e6e7f0}
+
+    /* footer status */
+    footer{margin-top:18px;display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:13px}
+    .badge{padding:6px 8px;border-radius:8px;background:#f3f4f6;font-weight:600}
+
+    .small{font-size:12px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div>
+        <h1>Auto‑Healing Dashboard</h1>
+        <div class="meta">To-Do • Weather • Smart Query — simulated auto-heal</div>
+      </div>
+      <div class="meta small">User: NIKHILUTTAM • Demo</div>
+    </header>
+
+    <div class="grid">
+      <!-- Left column: ToDo -->
+      <section class="card">
+        <h2>📝 To‑Do Manager</h2>
+        <div class="todo-input">
+          <input id="taskInput" placeholder="Add a new task and press Enter or Add" />
+          <button class="btn" id="addBtn">Add</button>
+        </div>
+        <div id="healMessage" class="small" style="margin-top:8px;color:#b76f00"></div>
+        <ul id="taskList" class="tasks"></ul>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="clearAll" style="background:#efefef;color:#333;border-radius:8px;padding:8px;border:0;cursor:pointer">Clear All</button>
+          <button id="exportTasks" style="background:#efefef;color:#333;border-radius:8px;padding:8px;border:0;cursor:pointer">Export</button>
+        </div>
+      </section>
+
+      <!-- Middle column: Weather -->
+      <section class="card">
+        <h2>🌤 Weather Panel</h2>
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div><span id="weatherStatusDot" class="status-dot status-normal"></span><strong id="weatherStatus">Normal</strong></div>
+            <div id="weatherSummary" class="small">--</div>
+          </div>
+          <div style="text-align:right">
+            <div id="tempLarge" style="font-size:28px;font-weight:700">--°C</div>
+            <div class="small">Local</div>
+          </div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button id="refreshWeather" class="btn">Refresh</button>
+          <button id="clearWeatherCache" style="background:#efefef;border:0;padding:8px;border-radius:8px;cursor:pointer">Clear Cache</button>
+        </div>
+        <div style="margin-top:12px" class="small">Cached data age: <span id="cacheAge">—</span></div>
+      </section>
+
+      <!-- Right column: Query/Chat -->
+      <section class="card panel-right">
+        <h2>💬 Smart Query Assistant</h2>
+        <div class="chat">
+          <div id="messages" class="messages"></div>
+          <div class="chat-input">
+            <input id="chatInput" placeholder="Try: 'Add task Buy milk' or 'Show tasks' or 'What is the weather?'" />
+            <button class="btn" id="sendBtn">Send</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <footer>
+      <div>Last auto-heal: <span id="lastHeal">Never</span></div>
+      <div class="small">Status: <span id="sysStatus">All systems nominal</span></div>
+    </footer>
+  </div>
+
+  <script>
+    // ---------------------- Utilities ----------------------
+    function $(id){return document.getElementById(id)}
+    function now(){return new Date().toLocaleString()}
+
+    // ---------------------- ToDo Logic ----------------------
+    const TASK_KEY = 'ah_tasks_v1';
+    const HEAL_KEY = 'ah_heal_v1';
+
+    function loadTasksFromCache(){
+      try{ return JSON.parse(localStorage.getItem(TASK_KEY) || '[]') }catch(e){return[]}
+    }
+    function saveTasksToCache(tasks){ localStorage.setItem(TASK_KEY, JSON.stringify(tasks)); }
+
+    // Fake API - fails 30% of the time
+    function fetchTasksFromAPI(){
+      return new Promise((resolve,reject)=>{
+        setTimeout(()=>{
+          const fail = Math.random() < 0.3;
+          if(fail) reject('API fetch failed')
+          else resolve(loadTasksFromCache())
+        },400)
+      })
+    }
+
+    async function loadTasks(){
+      try{
+        const tasks = await fetchTasksFromAPI();
+        renderTasks(tasks);
+        $('healMessage').textContent = '';
+      }catch(err){
+        $('healMessage').textContent = '⚠️ API failed — Auto‑healed using cached tasks.';
+        renderTasks(loadTasksFromCache());
+        recordHeal('todo', err);
+      }
+    }
+
+    function renderTasks(tasks){
+      const ul = $('taskList'); ul.innerHTML = '';
+      tasks.forEach((t,i)=>{
+        const li=document.createElement('li');
+        li.innerHTML = `<div>${escapeHtml(t)}</div><div class='task-actions'><button onclick="deleteTask(${i})">✖</button></div>`;
+        ul.appendChild(li);
+      })
+    }
+
+    function addTask(){
+      const v = $('taskInput').value.trim(); if(!v) return;
+      const tasks = loadTasksFromCache(); tasks.push(v); saveTasksToCache(tasks);
+      $('taskInput').value=''; loadTasks();
+    }
+    function deleteTask(i){ const tasks = loadTasksFromCache(); tasks.splice(i,1); saveTasksToCache(tasks); loadTasks(); }
+    function clearAll(){ localStorage.removeItem(TASK_KEY); loadTasks(); }
+
+    // ---------------------- Weather Logic ----------------------
+    const WKEY = 'ah_weather_v1';
+    function saveWeatherCache(data){ localStorage.setItem(WKEY, JSON.stringify({ts:Date.now(),data})); }
+    function getWeatherCache(){ try{const j=JSON.parse(localStorage.getItem(WKEY)||'null'); return j }catch(e){return null} }
+
+    // Fake weather fetch - 40% failure - returns random but plausible
+    function fetchWeatherAPI(){
+      return new Promise((resolve,reject)=>{
+        setTimeout(()=>{
+          if(Math.random() < 0.4) return reject('Weather API failed');
+          const temp = (18 + Math.round(Math.random()*12));
+          resolve({temp,desc:['Sunny','Cloudy','Partly sunny','Rainy'][Math.floor(Math.random()*4)]});
+        },600);
+      })
+    }
+
+    async function refreshWeather(){
+      try{
+        const data = await fetchWeatherAPI();
+        saveWeatherCache(data);
+        showWeather(data,'normal');
+      }catch(err){
+        const cached = getWeatherCache();
+        if(cached){ showWeather(cached.data,'healed'); recordHeal('weather',err);} else { showWeather({temp:'—',desc:'Unavailable'},'error'); recordHeal('weather',err);}      
+      }
+    }
+
+    function showWeather(data,state){
+      $('weatherStatus').textContent = state==='normal'?'Normal': state==='healed'?'Healed (cache)':'Error';
+      $('weatherStatusDot').className = 'status-dot ' + (state==='normal'?'status-normal': state==='healed'?'status-healed':'status-error');
+      $('weatherSummary').textContent = data.desc || '—';
+      $('tempLarge').textContent = (data.temp===undefined? '—' : data.temp + '°C');
+      const c = getWeatherCache(); $('cacheAge').textContent = c? Math.round((Date.now()-c.ts)/1000) + 's' : '—';
+    }
+
+    // ---------------------- Heal Recording ----------------------
+    function recordHeal(area,reason){
+      const h = JSON.parse(localStorage.getItem(HEAL_KEY)||'{}');
+      h.last = {area, reason: String(reason), at: Date.now()};
+      localStorage.setItem(HEAL_KEY, JSON.stringify(h));
+      $('lastHeal').textContent = new Date(h.last.at).toLocaleString();
+      $('sysStatus').textContent = 'Auto-heal ran';
+    }
+
+    function loadHeal(){ const h=JSON.parse(localStorage.getItem(HEAL_KEY)||'{}'); if(h.last) {$('lastHeal').textContent=new Date(h.last.at).toLocaleString(); $('sysStatus').textContent='Auto-healed previously';} }
+
+    // ---------------------- Query assistant ----------------------
+    function addMessage(text,who='bot'){ const m=document.createElement('div'); m.className='msg '+(who==='user'?'user':'bot'); m.textContent = text; $('messages').appendChild(m); $('messages').scrollTop = $('messages').scrollHeight; }
+
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    function processQuery(q){
+      const text = q.trim();
+      addMessage(text,'user');
+      const cmd = text.toLowerCase();
+
+      if(cmd.startsWith('add task ')){
+        const task = text.slice(9).trim(); const tasks = loadTasksFromCache(); tasks.push(task); saveTasksToCache(tasks); addMessage('Added task: "'+task+'"'); loadTasks(); return;
+      }
+      if(cmd.startsWith('delete task ')){
+        const n = parseInt(cmd.split('delete task ')[1]); if(!isNaN(n)){ const tasks = loadTasksFromCache(); if(n-1>=0 && n-1<tasks.length){ const removed = tasks.splice(n-1,1); saveTasksToCache(tasks); addMessage('Deleted task: '+removed); loadTasks(); } else addMessage('Task number out of range'); } else addMessage('Provide the task number to delete (e.g. Delete task 2)'); return;
+      }
+      if(cmd === 'show tasks' || cmd === 'list tasks'){
+        const tasks = loadTasksFromCache(); addMessage(tasks.length? 'Tasks:\n'+tasks.map((t,i)=> (i+1)+'. '+t).join('\n') : 'No tasks found'); return;
+      }
+      if(cmd.includes('weather')){
+        addMessage('Fetching weather...'); refreshWeather(); return;
+      }
+      if(cmd === 'clear tasks') { localStorage.removeItem(TASK_KEY); addMessage('All tasks cleared'); loadTasks(); return; }
+
+      addMessage('Sorry I did not understand. Try: Add task X | Delete task N | Show tasks | What is the weather?');
+    }
+
+    // ---------------------- Init + Event wiring ----------------------
+    document.addEventListener('DOMContentLoaded', ()=>{
+      $('addBtn').addEventListener('click', addTask);
+      $('taskInput').addEventListener('keydown', e=>{ if(e.key==='Enter') addTask(); });
+      $('clearAll').addEventListener('click', ()=>{ if(confirm('Clear all tasks?')){ clearAll(); } });
+      $('exportTasks').addEventListener('click', ()=>{ const d = JSON.stringify(loadTasksFromCache(),null,2); const w = window.open('about:blank'); w.document.write('<pre>'+escapeHtml(d)+'</pre>'); });
+
+      $('refreshWeather').addEventListener('click', refreshWeather);
+      $('clearWeatherCache').addEventListener('click', ()=>{ localStorage.removeItem(WKEY); showWeather({temp:'—',desc:'—'},'error'); });
+
+      $('sendBtn').addEventListener('click', ()=>{ const v=$('chatInput').value; if(v.trim()){ processQuery(v); $('chatInput').value=''; } });
+      $('chatInput').addEventListener('keydown', e=>{ if(e.key==='Enter'){ const v=$('chatInput').value; if(v.trim()){ processQuery(v); $('chatInput').value=''; }}});
+
+      loadTasks(); refreshWeather(); loadHeal();
+      addMessage('Hello! I am your Smart Assistant. Try commands like: Add task Buy milk | Show tasks | What is the weather?');
+    });
+  </script>
+</body>
+</html>
