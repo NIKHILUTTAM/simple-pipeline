@@ -53,11 +53,10 @@ jobs:
           git commit -m "🚑 Auto-Healed: Renamed index.bal back to index.html"
           git push
 
-  # ... then your health-check and deploy jobs follow ...
-jobs:
-  # 1. Check if the site is alive
+  # 2. Check if the site is alive
   health-check:
     runs-on: ubuntu-latest
+    needs: integrity-check  # Wait for integrity check to finish first
     outputs:
       trigger_deploy: ${{ steps.decide.outputs.trigger_deploy }}
     steps:
@@ -83,10 +82,10 @@ jobs:
             echo "trigger_deploy=true" >> $GITHUB_OUTPUT
           fi
 
-  # 2. Deploy to Vercel (Only runs if needed)
+  # 3. Deploy to Vercel (Only runs if needed)
   deploy:
     runs-on: ubuntu-latest
-    needs: [health-check]
+    needs: [integrity-check, health-check]
     # Run if it's a Push OR if Health Check said "true"
     if: ${{ github.event_name == 'push' || needs.health-check.outputs.trigger_deploy == 'true' }}
     outputs:
@@ -125,7 +124,7 @@ jobs:
             exit 0 
           fi
 
-  # 3. Auto-Heal (Only runs if Deploy Failed)
+  # 4. Auto-Heal (Only runs if Deploy Failed)
   autoheal:
     needs: deploy
     runs-on: ubuntu-latest
