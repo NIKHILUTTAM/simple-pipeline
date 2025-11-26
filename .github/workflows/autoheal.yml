@@ -34,9 +34,9 @@ jobs:
             echo "🚨 CRITICAL: index.html is MISSING!"
             
             # 2. Find the culprit
-            # List all files, but IGNORE known safe files (style.css, README, .github folder, etc.)
-            # The pattern below excludes standard files. The 'ls' command lists the remaining "suspicious" file.
-            CULPRIT=$(ls | grep -v -E "^(style.css|README.md|heal.log|package.json|package-lock.json|\.github|\.git)$" | head -n 1)
+            # List all files, but IGNORE known safe files.
+            # UPDATED: Added vercel.json and node_modules to the ignore list to prevent the "JSON Bug"
+            CULPRIT=$(ls | grep -v -E "^(style.css|README.md|heal.log|package.json|package-lock.json|vercel.json|node_modules|\.github|\.git)$" | head -n 1)
             
             if [ -n "$CULPRIT" ]; then
               echo "🕵️ Found suspicious file: $CULPRIT"
@@ -71,7 +71,8 @@ jobs:
           # Also stage the removal of the bad filename so git knows it was a rename
           git add "${{ steps.check_files.outputs.bad_filename }}"
           
-          git commit -m "🚑 Auto-Healed: Renamed ${{ steps.check_files.outputs.bad_filename }} back to index.html"
+          # We use '|| true' here to prevent the workflow from crashing if git complains (robustness)
+          git commit -m "🚑 Auto-Healed: Renamed ${{ steps.check_files.outputs.bad_filename }} back to index.html" || echo "Nothing to commit"
           git push
 
   # 2. Check if the site is alive
