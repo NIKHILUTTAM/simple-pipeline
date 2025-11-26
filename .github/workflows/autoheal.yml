@@ -25,33 +25,35 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # Needed to access git history for restoration
 
-      - name: 🕵️ Smart Detection for Renamed Files
+      - name: 🧠 Smart Restore from History
         id: check_files
         run: |
           # 1. Check if index.html is missing
           if [ ! -f "index.html" ]; then
             echo "🚨 CRITICAL: index.html is MISSING!"
+            echo "🔙 Option 4: Restoring from Git History (Last Safe Commit)..."
             
-            # 2. Find the culprit
-            # List all files, but IGNORE known safe files.
-            # UPDATED: Added vercel.json and node_modules to the ignore list to prevent the "JSON Bug"
-            CULPRIT=$(ls | grep -v -E "^(style.css|README.md|heal.log|package.json|package-lock.json|vercel.json|node_modules|\.github|\.git)$" | head -n 1)
+            # 2. Restore the file from the previous commit (HEAD~1)
+            # This guarantees we get the correct content, even if the file was deleted entirely.
+            git checkout HEAD~1 -- index.html
             
-            if [ -n "$CULPRIT" ]; then
-              echo "🕵️ Found suspicious file: $CULPRIT"
-              echo "🔧 It seems index.html was renamed to $CULPRIT."
-              echo "✨ Renaming it back to index.html..."
-              
-              mv "$CULPRIT" index.html
-              
-              echo "✅ File restored."
+            if [ -f "index.html" ]; then
+              echo "✅ index.html restored successfully."
               echo "fixed=true" >> $GITHUB_OUTPUT
               
-              # Save the name of the bad file so we can commit the deletion of the old name
-              echo "bad_filename=$CULPRIT" >> $GITHUB_OUTPUT
+              # 3. Cleanup: Find the bad renamed file (the culprit) to delete it
+              # We verify it's not a safe file before marking it as garbage
+              CULPRIT=$(ls | grep -v -E "^(index.html|style.css|README.md|heal.log|package.json|package-lock.json|vercel.json|node_modules|\.github|\.git)$" | head -n 1)
+              
+              if [ -n "$CULPRIT" ]; then
+                echo "🧹 Detected abandoned file '$CULPRIT'. Marking for deletion."
+                echo "garbage_file=$CULPRIT" >> $GITHUB_OUTPUT
+              fi
             else
-              echo "❌ Could not find any file to restore. It might have been deleted completely."
+              echo "❌ Failed to restore from history. File might not have existed in previous commit."
               echo "fixed=false" >> $GITHUB_OUTPUT
             fi
           else
@@ -65,14 +67,18 @@ jobs:
           git config user.name "File Police Bot"
           git config user.email "bot@github.com"
           
-          # Add the restored file
+          # Stage the restored file
           git add index.html
           
-          # Also stage the removal of the bad filename so git knows it was a rename
-          git add "${{ steps.check_files.outputs.bad_filename }}"
+          # If we found a garbage file (the renamed one), remove it
+          if [ -n "${{ steps.check_files.outputs.garbage_file }}" ]; then
+            git rm "${{ steps.check_files.outputs.garbage_file }}"
+            MSG="🚑 Auto-Healed: Restored index.html & removed ${{ steps.check_files.outputs.garbage_file }}"
+          else
+            MSG="🚑 Auto-Healed: Restored index.html from history"
+          fi
           
-          # We use '|| true' here to prevent the workflow from crashing if git complains (robustness)
-          git commit -m "🚑 Auto-Healed: Renamed ${{ steps.check_files.outputs.bad_filename }} back to index.html" || echo "Nothing to commit"
+          git commit -m "$MSG" || echo "Nothing to commit"
           git push
 
   # 2. Check if the site is alive
