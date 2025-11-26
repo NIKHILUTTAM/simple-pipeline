@@ -19,6 +19,42 @@ permissions:
   issues: write
 
 jobs:
+  # 1. NEW JOB: The File Police
+  integrity-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🕵️ Check for 'index.bal' sabotage
+        id: check_files
+        run: |
+          # Check if index.html is missing BUT index.bal exists
+          if [ ! -f "index.html" ] && [ -f "index.bal" ]; then
+            echo "🚨 DETECTED ILLEGAL FILE NAME: index.bal"
+            echo "🔧 Initiating auto-correction protocol..."
+            
+            # THE FIX: Rename it back
+            mv index.bal index.html
+            
+            echo "✅ File restored to index.html"
+            echo "fixed=true" >> $GITHUB_OUTPUT
+          else
+            echo "✅ File structure looks normal."
+            echo "fixed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and Push the Fix
+        if: steps.check_files.outputs.fixed == 'true'
+        run: |
+          git config user.name "File Police Bot"
+          git config user.email "bot@github.com"
+          git add index.html index.bal
+          git commit -m "🚑 Auto-Healed: Renamed index.bal back to index.html"
+          git push
+
+  # ... then your health-check and deploy jobs follow ...
+jobs:
   # 1. Check if the site is alive
   health-check:
     runs-on: ubuntu-latest
