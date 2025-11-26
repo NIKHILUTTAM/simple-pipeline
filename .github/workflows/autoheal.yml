@@ -26,21 +26,36 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: 🕵️ Check for 'index.bal' sabotage
+      - name: 🕵️ Smart Detection for Renamed Files
         id: check_files
         run: |
-          # Check if index.html is missing BUT index.bal exists
-          if [ ! -f "index.html" ] && [ -f "index.bal" ]; then
-            echo "🚨 DETECTED ILLEGAL FILE NAME: index.bal"
-            echo "🔧 Initiating auto-correction protocol..."
+          # 1. Check if index.html is missing
+          if [ ! -f "index.html" ]; then
+            echo "🚨 CRITICAL: index.html is MISSING!"
             
-            # THE FIX: Rename it back
-            mv index.bal index.html
+            # 2. Find the culprit
+            # List all files, but IGNORE known safe files (style.css, README, .github folder, etc.)
+            # The pattern below excludes standard files. The 'ls' command lists the remaining "suspicious" file.
+            CULPRIT=$(ls | grep -v -E "^(style.css|README.md|heal.log|package.json|package-lock.json|\.github|\.git)$" | head -n 1)
             
-            echo "✅ File restored to index.html"
-            echo "fixed=true" >> $GITHUB_OUTPUT
+            if [ -n "$CULPRIT" ]; then
+              echo "🕵️ Found suspicious file: $CULPRIT"
+              echo "🔧 It seems index.html was renamed to $CULPRIT."
+              echo "✨ Renaming it back to index.html..."
+              
+              mv "$CULPRIT" index.html
+              
+              echo "✅ File restored."
+              echo "fixed=true" >> $GITHUB_OUTPUT
+              
+              # Save the name of the bad file so we can commit the deletion of the old name
+              echo "bad_filename=$CULPRIT" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Could not find any file to restore. It might have been deleted completely."
+              echo "fixed=false" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "✅ File structure looks normal."
+            echo "✅ index.html is present. No action needed."
             echo "fixed=false" >> $GITHUB_OUTPUT
           fi
 
@@ -49,8 +64,14 @@ jobs:
         run: |
           git config user.name "File Police Bot"
           git config user.email "bot@github.com"
-          git add index.html index.bal
-          git commit -m "🚑 Auto-Healed: Renamed index.bal back to index.html"
+          
+          # Add the restored file
+          git add index.html
+          
+          # Also stage the removal of the bad filename so git knows it was a rename
+          git add "${{ steps.check_files.outputs.bad_filename }}"
+          
+          git commit -m "🚑 Auto-Healed: Renamed ${{ steps.check_files.outputs.bad_filename }} back to index.html"
           git push
 
   # 2. Check if the site is alive
