@@ -3,7 +3,7 @@ pipeline {
 
   options {
     timestamps()
-    ansiColor('xterm')
+    // ansiColor('xterm') // Commented out to fix "Invalid option type" error if plugin is missing
   }
 
   environment {
