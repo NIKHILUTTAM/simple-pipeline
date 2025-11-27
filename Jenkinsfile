@@ -81,13 +81,16 @@ Example: { "patch": "diff --git a/index.html b/index.html\\n..." }
             // Write prompt to file to avoid quoting issues in PowerShell
             writeFile file: 'prompt.txt', text: prompt
 
-            // 2. Call Gemini API using PowerShell
+            // 2. Call Gemini API using PowerShell with Error Handling
             powershell '''
 $ErrorActionPreference = "Stop"
 $apiKey = $env:GEMINI_KEY
+# Sanitize API Key (remove spaces/newlines)
+if ($apiKey) { $apiKey = $apiKey.Trim() }
+
 $promptText = Get-Content prompt.txt -Raw
 
-$body = @{
+$bodyObj = @{
     "contents" = @(
         @{
             "parts" = @(
@@ -95,13 +98,33 @@ $body = @{
             )
         }
     )
-} | ConvertTo-Json -Depth 10
+}
+# Convert to JSON
+$bodyJson = $bodyObj | ConvertTo-Json -Depth 10 -Compress
 
 $uri = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey"
 
 Write-Host "Calling Gemini API..."
-$response = Invoke-RestMethod -Method Post -Uri $uri -Headers @{"Content-Type"="application/json"} -Body $body
-$response | ConvertTo-Json -Depth 10 | Out-File response.json -Encoding utf8
+
+try {
+    # Force UTF-8 Encoding for the body
+    $utf8Body = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
+    
+    $response = Invoke-RestMethod -Method Post -Uri $uri -ContentType "application/json; charset=utf-8" -Body $utf8Body
+    $response | ConvertTo-Json -Depth 10 | Out-File response.json -Encoding utf8
+} catch {
+    Write-Host "❌ HTTP Request Failed"
+    $e = $_.Exception
+    # Check if there is a response body (e.g. from Google)
+    if ($e.Response) {
+        $reader = New-Object System.IO.StreamReader($e.Response.GetResponseStream())
+        $errBody = $reader.ReadToEnd()
+        Write-Host "⬇️ Gemini Error Response ⬇️"
+        Write-Host $errBody
+        Write-Host "⬆️ -------------------- ⬆️"
+    }
+    throw $_
+}
 '''
           }
         }
