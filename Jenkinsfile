@@ -1,173 +1,199 @@
 pipeline {
-    agent any
+  agent any
 
-    // Define environment variables safely
-    environment {
-        REPO_URL = 'https://github.com/NIKHILUTTAM/simple-pipeline.git'
-        BRANCH_NAME = 'main'
-        // Using credentials binding for sensitive data
+  options {
+    timestamps()
+    ansiColor('xterm')
+  }
+
+  environment {
+    REPO = 'https://github.com/NIKHILUTTAM/simple-pipeline.git'
+    BRANCH = 'main'
+    // SIMULATE_FAILURE can be toggled to false to run the real build
+    SIMULATE_FAILURE = 'true' 
+  }
+
+  stages {
+    stage('Clean Workspace') {
+      steps {
+        echo "Cleaning workspace..."
+        // Safe delete for Windows
+        bat 'if exist .git rmdir /s /q .git'
+      }
     }
 
-    stages {
-        // ---------------------------------------------------------
-        // STAGE 1: Checkout Code
-        // ---------------------------------------------------------
-        stage('Checkout') {
-            steps {
-                script {
-                    // Clean workspace before starting
-                    deleteDir() 
-                }
-                // Use Jenkins Credential ID 'github-token' (Username/Password type)
-                withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
-                    sh '''
-                        git init
-                        git remote add origin ${REPO_URL}
-                        git fetch --depth 1 origin ${BRANCH_NAME}
-                        git checkout -b ${BRANCH_NAME} origin/${BRANCH_NAME}
-                    '''
-                }
-            }
+    stage('Checkout') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PSW')]) {
+          bat """
+            git init
+            git remote add origin ${REPO}
+            set GIT_ASKPASS=echo
+            git fetch --no-tags --progress https://%GIT_USER%:%GIT_PSW%@github.com/%GIT_USER%/simple-pipeline.git +refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}
+            git checkout -f origin/${BRANCH}
+          """
         }
+      }
+    }
 
-        // ---------------------------------------------------------
-        // STAGE 2: Build & Test (Simulated)
-        // ---------------------------------------------------------
-        stage('Build & Test') {
-            steps {
-                script {
-                    echo "🚀 Running Build and Tests..."
-                    // SIMULATION: Check for syntax errors manually to simulate failure
-                    // In a real app, this would be 'npm test' or 'mvn clean install'
-                    def syntaxCheck = sh(script: "grep -q '</html>' index.html", returnStatus: true)
-                    
-                    if (syntaxCheck != 0) {
-                        echo "❌ Build Failed: Syntax Error Detected (Missing </html>)"
-                        env.BUILD_STATUS = 'FAILURE'
-                        // We do NOT fail the stage yet, so we can run auto-heal
-                    } else {
-                        echo "✅ Build Succeeded"
-                        env.BUILD_STATUS = 'SUCCESS'
-                    }
-                }
-            }
+    stage('Run Tests / Build') {
+      steps {
+        script {
+          env.BUILD_FAILED = 'false'
+          echo "Running tests/build..."
+          
+          // Simulation logic for Windows
+          def rc = bat(returnStatus: true, script: '''
+            if "%SIMULATE_FAILURE%"=="false" (
+                echo Running real build
+                exit /b 0
+            ) else (
+                echo Simulated failure
+                exit /b 1
+            )
+          ''')
+          
+          if (rc != 0) {
+            echo "⚠ Build failed (exit code ${rc}). Initiating Auto-Heal."
+            env.BUILD_FAILED = 'true'
+          } else {
+            echo "✅ Build succeeded."
+          }
         }
+      }
+    }
 
-        // ---------------------------------------------------------
-        // STAGE 3: Call Gemini AI (Only if Build Failed)
-        // ---------------------------------------------------------
-        stage('AI Diagnosis') {
-            when {
-                expression { env.BUILD_STATUS == 'FAILURE' }
-            }
-            steps {
-                withCredentials([string(credentialsId: 'gemini-api-key', variable: 'GEMINI_KEY')]) {
-                    script {
-                        echo "🤖 Asking Gemini to fix the code..."
-                        
-                        // Read the broken file
-                        def fileContent = readFile('index.html')
-                        
-                        // Prepare the Python script to call Gemini
-                        def pythonScript = """
-import os, json, urllib.request, re
-
-api_key = os.environ['GEMINI_KEY']
-code = '''${fileContent}'''
-
-prompt = '''
-You are a DevOps Auto-Healer. 
-The following HTML file caused a build failure.
-It is likely missing a closing tag or has a syntax error.
-
-CODE:
-''' + code + '''
-
-TASK: Fix the code. Output ONLY the fixed code. No markdown.
+    stage('AI Diagnosis & Patch') {
+      when {
+        expression { env.BUILD_FAILED == 'true' }
+      }
+      steps {
+        withCredentials([string(credentialsId: 'gemini-key', variable: 'GEMINI_KEY')]) {
+          script {
+            // 1. Prepare Prompt
+            // We ask for a unified diff specifically
+            def prompt = '''
+You are a DevOps Auto-Healer.
+The build failed. Please generate a git patch to fix the code.
+Output ONLY a JSON object with a "patch" field containing the unified diff.
+Example: { "patch": "diff --git a/index.html b/index.html\\n..." }
 '''
+            // Write prompt to file to avoid quoting issues in PowerShell
+            writeFile file: 'prompt.txt', text: prompt
 
-url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + api_key
-headers = {'Content-Type': 'application/json'}
-data = {'contents': [{'parts': [{'text': prompt}]}]}
+            // 2. Call Gemini API using PowerShell
+            powershell '''
+$ErrorActionPreference = "Stop"
+$apiKey = $env:GEMINI_KEY
+$promptText = Get-Content prompt.txt -Raw
 
-try:
-    req = urllib.request.Request(url, json.dumps(data).encode('utf-8'), headers)
-    with urllib.request.urlopen(req) as response:
-        result = json.loads(response.read().decode())
-        ai_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
-        
-        # Clean markdown
-        ai_text = re.sub(r'^```\\\\w*', '', ai_text).strip()
-        ai_text = re.sub(r'```$', '', ai_text).strip()
-        
-        # Output ONLY the code to a file
-        with open('index_fixed.html', 'w') as f:
-            f.write(ai_text)
-            
-except Exception as e:
-    print(f"Error: {e}")
-    exit(1)
-"""
-                        // Run the Python script
-                        writeFile file: 'ai_fixer.py', text: pythonScript
-                        sh 'python3 ai_fixer.py'
-                    }
-                }
-            }
+$body = @{
+    "contents" = @(
+        @{
+            "parts" = @(
+                @{ "text" = $promptText }
+            )
         }
+    )
+} | ConvertTo-Json -Depth 10
 
-        // ---------------------------------------------------------
-        // STAGE 4: Apply & Push Fix
-        // ---------------------------------------------------------
-        stage('Apply & Push Fix') {
-            when {
-                expression { fileExists('index_fixed.html') }
-            }
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
-                    sh '''
-                        mv index_fixed.html index.html
-                        
-                        git config user.email "jenkins-bot@example.com"
-                        git config user.name "Jenkins Bot"
-                        
-                        git add index.html
-                        git commit -m "🚑 Auto-Heal: Gemini fixed syntax error"
-                        
-                        # Push using the token credential
-                        git push https://${GIT_USER}:${GIT_PASS}@github.com/NIKHILUTTAM/simple-pipeline.git ${BRANCH_NAME}
-                    '''
-                    echo "✅ Fix pushed to GitHub. Triggering new build..."
-                }
-            }
-        }
+$uri = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey"
 
-        // ---------------------------------------------------------
-        // STAGE 5: Deploy to Vercel (Only if Build Succeeded)
-        // ---------------------------------------------------------
-        stage('Deploy to Vercel') {
-            when {
-                expression { env.BUILD_STATUS == 'SUCCESS' }
-            }
-            steps {
-                withCredentials([string(credentialsId: 'vercel-token', variable: 'VERCEL_TOKEN')]) {
-                    sh '''
-                        # Install Vercel CLI if missing
-                        if ! command -v vercel &> /dev/null; then
-                            npm install -g vercel
-                        fi
-                        
-                        # Deploy
-                        vercel --prod --confirm --token ${VERCEL_TOKEN}
-                    '''
-                }
-            }
+Write-Host "Calling Gemini API..."
+$response = Invoke-RestMethod -Method Post -Uri $uri -Headers @{"Content-Type"="application/json"} -Body $body
+$response | ConvertTo-Json -Depth 10 | Out-File response.json -Encoding utf8
+'''
+          }
         }
+      }
+    }
+
+    stage('Extract & Apply Patch') {
+      when {
+        expression { env.BUILD_FAILED == 'true' }
+      }
+      steps {
+        script {
+          // 3. Parse JSON and Apply Patch
+          powershell '''
+$ErrorActionPreference = "Stop"
+
+if (-not (Test-Path response.json)) { Write-Error "No response from AI"; exit 1 }
+
+$json = Get-Content response.json -Raw | ConvertFrom-Json
+$aiText = $json.candidates[0].content.parts[0].text
+
+# Extract JSON from Markdown if present
+if ($aiText -match "```json([\\s\\S]*?)```") {
+    $aiText = $matches[1]
+}
+
+try {
+    $patchJson = $aiText | ConvertFrom-Json
+    $patchContent = $patchJson.patch
+    
+    if (-not $patchContent) { throw "No patch field in AI response" }
+    
+    $patchContent | Out-File -FilePath autoheal_patch.diff -Encoding utf8
+    Write-Host "✅ Patch saved to autoheal_patch.diff"
+} catch {
+    Write-Warning "Could not parse AI response as JSON. Dump: $aiText"
+    exit 1
+}
+
+# Apply
+Write-Host "Applying patch..."
+git apply --ignore-space-change --ignore-whitespace autoheal_patch.diff
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "✅ Patch applied successfully!"
+} else {
+    Write-Error "❌ Git apply failed."
+    exit 1
+}
+'''
+        }
+      }
+    }
+
+    stage('Commit & Push Fix') {
+      when {
+        expression { env.BUILD_FAILED == 'true' }
+      }
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PSW')]) {
+          bat """
+            git config user.email "jenkins-bot@autoheal"
+            git config user.name "Jenkins Bot"
+            git add .
+            git commit -m "🚑 Auto-Heal: AI fixed build failure"
+            git push https://%GIT_USER%:%GIT_PSW%@github.com/%GIT_USER%/simple-pipeline.git HEAD:${BRANCH}
+          """
+        }
+      }
     }
     
-    post {
-        failure {
-            echo "❌ Pipeline Failed. Please check logs."
-        }
+    stage('Trigger Deployment') {
+       when {
+         expression { env.BUILD_FAILED == 'true' }
+       }
+       steps {
+         withCredentials([string(credentialsId: 'vercel-token', variable: 'VERCEL_TOKEN')]) {
+           powershell '''
+             if (Get-Command vercel -ErrorAction SilentlyContinue) {
+               echo "Deploying to Vercel..."
+               vercel --prod --confirm --token $env:VERCEL_TOKEN
+             } else {
+               echo "Vercel CLI not found. Skipping deployment."
+             }
+           '''
+         }
+       }
     }
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: 'response.json, autoheal_patch.diff', allowEmptyArchive: true
+    }
+  }
 }
