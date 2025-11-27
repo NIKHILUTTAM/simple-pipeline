@@ -98,14 +98,21 @@ jobs:
               with open(filename, 'r') as f:
                   code = f.read()
 
+              # UPDATED PROMPT: STRICT MODE
               prompt = f'''
-              Analyze this code for SYNTAX ERRORS (like missing tags, unclosed brackets, typos).
+              Act as a STRICT CODE REVIEWER.
+              Analyze this code for SYNTAX ERRORS, missing closing tags (like </html>, </div>), or typos.
+              
               filename: {filename}
               code:
               {code}
 
-              If the code is valid, output ONLY the word: VALID
-              If there are errors, output ONLY the full corrected code.
+              Rules:
+              1. HTML must have closing tags (</html>, </body>).
+              2. JS/CSS must have closed brackets.
+              
+              If the code is perfect, output ONLY the word: VALID
+              If there are ANY errors, output ONLY the full corrected code.
               Do not include markdown.
               '''
 
@@ -117,19 +124,24 @@ jobs:
                   req = urllib.request.Request(url, json.dumps(data).encode('utf-8'), headers)
                   with urllib.request.urlopen(req) as response:
                       result = json.loads(response.read().decode())
-                      ai_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
                       
-                      # Clean response
-                      ai_text = re.sub(r'^```\w*', '', ai_text).strip()
-                      ai_text = re.sub(r'```$', '', ai_text).strip()
+                      if 'candidates' in result and result['candidates']:
+                          ai_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
+                          
+                          # Clean response
+                          ai_text = re.sub(r'^```\w*', '', ai_text).strip()
+                          ai_text = re.sub(r'```$', '', ai_text).strip()
 
-                      if ai_text == 'VALID':
-                          print(f'✅ {filename} is clean.')
-                      elif len(ai_text) > 10: 
-                          print(f'⚠️ Syntax Error detected in {filename}. Applying AI fix...')
-                          with open(filename, 'w') as f:
-                              f.write(ai_text)
-                          fixed_any = True
+                          if ai_text == 'VALID':
+                              print(f'✅ {filename} is clean.')
+                          elif len(ai_text) > 10: 
+                              print(f'⚠️ Syntax Error detected in {filename}. Applying AI fix...')
+                              with open(filename, 'w') as f:
+                                  f.write(ai_text)
+                              fixed_any = True
+                      else:
+                          print(f'⚠️ No AI response for {filename}')
+                          
               except Exception as e:
                   print(f'AI Error: {e}')
 
@@ -143,7 +155,7 @@ jobs:
             git config user.name "Syntax Bot"
             git config user.email "bot@github.com"
             git add .
-            git commit -m "🚑 Layer 2: AI fixed syntax errors"
+            git commit -m "🚑 Layer 2: AI fixed syntax errors (Strict Mode)"
             git push
             echo "🔄 Fix pushed. Stopping this run to let the new run take over."
             exit 1 
