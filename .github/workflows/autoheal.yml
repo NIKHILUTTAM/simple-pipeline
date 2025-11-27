@@ -125,7 +125,7 @@ jobs:
 
                       if ai_text == 'VALID':
                           print(f'✅ {filename} is clean.')
-                      elif len(ai_text) > 10: # Assuming valid code is longer than 10 chars
+                      elif len(ai_text) > 10: 
                           print(f'⚠️ Syntax Error detected in {filename}. Applying AI fix...')
                           with open(filename, 'w') as f:
                               f.write(ai_text)
@@ -189,7 +189,7 @@ jobs:
             deploy_error.txt
             index.html
 
-deep-heal:
+  deep-heal:
     runs-on: ubuntu-latest
     needs: deploy
     if: failure() # Runs only if Deploy fails
@@ -242,8 +242,8 @@ deep-heal:
                   
                   # 🛡️ SAFETY CHECK: Did we get an error?
                   if 'error' in result:
-                      print(f'❌ API Error: {result['error']}')
-                      exit(1) # Fail the job gracefully
+                      print('❌ API Error: ' + str(result.get('error')))
+                      exit(1)
                       
                   # 🛡️ SAFETY CHECK: Do we have candidates?
                   if 'candidates' not in result or not result['candidates']:
@@ -278,6 +278,7 @@ deep-heal:
              git commit -m "🚑 Layer 3: AI fixed deployment error from logs"
              git push
           fi
+
   # ---------------------------------------------------------
   # Validation Layer
   # ---------------------------------------------------------
