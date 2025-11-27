@@ -20,7 +20,7 @@ pipeline {
         stage('Build') {
             steps {
                 echo "Simulating build failure..."
-                sh "exit 1"    // <-- this forces a failure for testing
+                bat "exit 1"    // WINDOWS FIX
             }
         }
 
@@ -33,20 +33,18 @@ pipeline {
             steps {
                 echo "Running Gemini auto-healing engine..."
 
-                sh '''
-                    echo "Calling Gemini API..."
-                    curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=$GEMINI_KEY" \
-                    -H "Content-Type: application/json" \
-                    -d "{
-                        \\"contents\\": [{\\"parts\\": [{\\"text\\": \\"Fix errors in codebase.\\"}]}]
-                    }" > response.json
+                bat '''
+                    echo Calling Gemini API...
+                    curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=%GEMINI_KEY%" ^
+                    -H "Content-Type: application/json" ^
+                    -d "{\\"contents\\":[{\\"parts\\":[{\\"text\\":\\"Fix errors in codebase.\\"}]}]}" > response.json
 
-                    echo "Gemini response saved."
+                    echo Gemini response saved.
                 '''
 
                 echo "Applying fix (simulated)…"
-                sh '''
-                    echo "// FIX APPLIED BY GEMINI" >> index.html
+                bat '''
+                    echo // FIX APPLIED BY GEMINI >> index.html
                 '''
             }
         }
@@ -58,13 +56,14 @@ pipeline {
                 }
             }
             steps {
-                sh '''
+
+                bat '''
                     git config user.email "autoheal@jenkins.com"
                     git config user.name "Jenkins AutoHeal"
 
                     git add .
-                    git commit -m "Auto-healed by Jenkins + Gemini" || true
-                    git push https://$GIT_CREDENTIALS@github.com/NIKHILUTTAM/simple-pipeline.git HEAD:main
+                    git commit -m "Auto-healed by Jenkins + Gemini" || exit 0
+                    git push https://%GIT_CREDENTIALS%@github.com/NIKHILUTTAM/simple-pipeline.git HEAD:main
                 '''
             }
         }
@@ -76,12 +75,12 @@ pipeline {
                 }
             }
             steps {
-                sh '''
-                    echo "Triggering Vercel Deployment..."
-                    curl -X POST "https://api.vercel.com/v13/deployments" \
-                        -H "Authorization: Bearer $VERCEL_TOKEN" \
-                        -H "Content-Type: application/json" \
-                        -d "{\\"name\\":\\"simple-pipeline\\", \\"gitSource\\":{\\"type\\":\\"github\\"}}"
+                bat '''
+                    echo Triggering Vercel Deployment...
+                    curl -X POST "https://api.vercel.com/v13/deployments" ^
+                        -H "Authorization: Bearer %VERCEL_TOKEN%" ^
+                        -H "Content-Type: application/json" ^
+                        -d "{\\"name\\":\\"simple-pipeline\\",\\"gitSource\\":{\\"type\\":\\"github\\"}}" 
                 '''
             }
         }
@@ -89,7 +88,7 @@ pipeline {
 
     post {
         failure {
-            echo "❌ Pipeline failed — but auto-healing ran."
+            echo "❌ Pipeline failed — but auto-healing attempted."
         }
         success {
             echo "✅ Pipeline successful."
