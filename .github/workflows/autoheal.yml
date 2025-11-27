@@ -73,7 +73,7 @@ jobs:
           exit 1 # Intentionally fail to stop this run (the new run will handle the rest)
 
   # ---------------------------------------------------------
-  # LAYER 2: AI Syntax Auditor (Pre-Deploy Check)
+  # LAYER 2: Hybrid Syntax Auditor (Python + AI)
   # ---------------------------------------------------------
   syntax-check:
     runs-on: ubuntu-latest
@@ -82,7 +82,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: 🤖 Gemini Syntax Scan
+      - name: 🤖 Hybrid Syntax Scan
         id: ai_scan
         run: |
           python3 -c "
@@ -98,19 +98,32 @@ jobs:
               with open(filename, 'r') as f:
                   code = f.read()
 
-              # UPDATED PROMPT: STRICT MODE
+              # 🛡️ LEVEL 1: Python Hard-Checks (Deterministic)
+              # Force specific rules that AI might miss.
+              if filename.endswith('.html'):
+                  if '</html>' not in code:
+                      print(f'🚨 Rule Violation: {filename} is missing </html> tag.')
+                      print('🔧 Applying Hard-Fix: Appending </html>...')
+                      code = code + '\n</html>'
+                      with open(filename, 'w') as f: f.write(code)
+                      fixed_any = True
+                  
+                  if '</body>' not in code:
+                      print(f'🚨 Rule Violation: {filename} is missing </body> tag.')
+                      print('🔧 Applying Hard-Fix: Appending </body>...')
+                      code = code + '\n</body>'
+                      with open(filename, 'w') as f: f.write(code)
+                      fixed_any = True
+
+              # 🛡️ LEVEL 2: AI Audit (Contextual)
               prompt = f'''
               Act as a STRICT CODE REVIEWER.
-              Analyze this code for SYNTAX ERRORS, missing closing tags (like </html>, </div>), or typos.
+              Analyze this code for SYNTAX ERRORS (unclosed brackets, typos, invalid logic).
               
               filename: {filename}
               code:
               {code}
 
-              Rules:
-              1. HTML must have closing tags (</html>, </body>).
-              2. JS/CSS must have closed brackets.
-              
               If the code is perfect, output ONLY the word: VALID
               If there are ANY errors, output ONLY the full corrected code.
               Do not include markdown.
@@ -128,14 +141,13 @@ jobs:
                       if 'candidates' in result and result['candidates']:
                           ai_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
                           
-                          # Clean response
                           ai_text = re.sub(r'^```\w*', '', ai_text).strip()
                           ai_text = re.sub(r'```$', '', ai_text).strip()
 
                           if ai_text == 'VALID':
-                              print(f'✅ {filename} is clean.')
+                              print(f'✅ {filename} passed AI check.')
                           elif len(ai_text) > 10: 
-                              print(f'⚠️ Syntax Error detected in {filename}. Applying AI fix...')
+                              print(f'⚠️ AI found further issues in {filename}. Applying fix...')
                               with open(filename, 'w') as f:
                                   f.write(ai_text)
                               fixed_any = True
@@ -155,7 +167,7 @@ jobs:
             git config user.name "Syntax Bot"
             git config user.email "bot@github.com"
             git add .
-            git commit -m "🚑 Layer 2: AI fixed syntax errors (Strict Mode)"
+            git commit -m "🚑 Layer 2: Pipeline fixed syntax errors"
             git push
             echo "🔄 Fix pushed. Stopping this run to let the new run take over."
             exit 1 
