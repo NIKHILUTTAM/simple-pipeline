@@ -1,323 +1,323 @@
-name: Auto-Healing Pipeline
+# name: Auto-Healing Pipeline
 
-on:
-  push:
-    branches: [ "main" ]
-  schedule:
-    - cron: "*/30 * * * *"
-  workflow_dispatch: {}
+# on:
+#   push:
+#     branches: [ "main" ]
+#   schedule:
+#     - cron: "*/30 * * * *"
+#   workflow_dispatch: {}
 
-env:
-  SITE_URL: "https://simple-pipeline.vercel.app"
-  # ⚠️ HARDCODED KEY (Use Secrets in Production!)
-  GEMINI_API_KEY: 'AIzaSyCdjVIxmtbj8K6OE2DNFOFksENGs9ryixI'
+# env:
+#   SITE_URL: "https://simple-pipeline.vercel.app"
+#   # ⚠️ HARDCODED KEY (Use Secrets in Production!)
+#   GEMINI_API_KEY: 'AIzaSyCdjVIxmtbj8K6OE2DNFOFksENGs9ryixI'
 
-permissions:
-  contents: write
-  issues: write
+# permissions:
+#   contents: write
+#   issues: write
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+# concurrency:
+#   group: ${{ github.workflow }}-${{ github.ref }}
+#   cancel-in-progress: false
 
-jobs:
-  # ---------------------------------------------------------
-  # LAYER 1: The File Police (Path & Rename Correction)
-  # ---------------------------------------------------------
-  integrity-check:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
+# jobs:
+#   # ---------------------------------------------------------
+#   # LAYER 1: The File Police (Path & Rename Correction)
+#   # ---------------------------------------------------------
+#   integrity-check:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout Code
+#         uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 2
 
-      - name: 🧠 Smart Restore from History
-        id: check_files
-        run: |
-          # Logic: If index.html is missing, assume it was renamed or moved.
-          if [ ! -f "index.html" ]; then
-            echo "🚨 CRITICAL: index.html is MISSING!"
-            echo "🔙 Restoring from Git History..."
-            git checkout HEAD~1 -- index.html
+#       - name: 🧠 Smart Restore from History
+#         id: check_files
+#         run: |
+#           # Logic: If index.html is missing, assume it was renamed or moved.
+#           if [ ! -f "index.html" ]; then
+#             echo "🚨 CRITICAL: index.html is MISSING!"
+#             echo "🔙 Restoring from Git History..."
+#             git checkout HEAD~1 -- index.html
             
-            if [ -f "index.html" ]; then
-              echo "fixed=true" >> $GITHUB_OUTPUT
-              # Find the renamed file (ignoring safe files) to delete it
-              CULPRIT=$(ls | grep -v -E "^(index.html|style.css|README.md|heal.log|package.json|package-lock.json|vercel.json|node_modules|\.github|\.git)$" | head -n 1)
-              if [ -n "$CULPRIT" ]; then
-                echo "garbage_file=$CULPRIT" >> $GITHUB_OUTPUT
-              fi
-            else
-              echo "fixed=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "fixed=false" >> $GITHUB_OUTPUT
-          fi
+#             if [ -f "index.html" ]; then
+#               echo "fixed=true" >> $GITHUB_OUTPUT
+#               # Find the renamed file (ignoring safe files) to delete it
+#               CULPRIT=$(ls | grep -v -E "^(index.html|style.css|README.md|heal.log|package.json|package-lock.json|vercel.json|node_modules|\.github|\.git)$" | head -n 1)
+#               if [ -n "$CULPRIT" ]; then
+#                 echo "garbage_file=$CULPRIT" >> $GITHUB_OUTPUT
+#               fi
+#             else
+#               echo "fixed=false" >> $GITHUB_OUTPUT
+#             fi
+#           else
+#             echo "fixed=false" >> $GITHUB_OUTPUT
+#           fi
 
-      - name: Commit Fix (If needed)
-        if: steps.check_files.outputs.fixed == 'true'
-        run: |
-          git config user.name "File Police Bot"
-          git config user.email "bot@github.com"
-          git add index.html
-          if [ -n "${{ steps.check_files.outputs.garbage_file }}" ]; then
-            git rm "${{ steps.check_files.outputs.garbage_file }}"
-            MSG="🚑 Layer 1: Restored index.html & removed ${{ steps.check_files.outputs.garbage_file }}"
-          else
-            MSG="🚑 Layer 1: Restored index.html from history"
-          fi
-          git commit -m "$MSG"
-          git push
-          echo "🔄 Fix pushed. Stopping this run to let the new run take over."
-          exit 1 # Intentionally fail to stop this run (the new run will handle the rest)
+#       - name: Commit Fix (If needed)
+#         if: steps.check_files.outputs.fixed == 'true'
+#         run: |
+#           git config user.name "File Police Bot"
+#           git config user.email "bot@github.com"
+#           git add index.html
+#           if [ -n "${{ steps.check_files.outputs.garbage_file }}" ]; then
+#             git rm "${{ steps.check_files.outputs.garbage_file }}"
+#             MSG="🚑 Layer 1: Restored index.html & removed ${{ steps.check_files.outputs.garbage_file }}"
+#           else
+#             MSG="🚑 Layer 1: Restored index.html from history"
+#           fi
+#           git commit -m "$MSG"
+#           git push
+#           echo "🔄 Fix pushed. Stopping this run to let the new run take over."
+#           exit 1 # Intentionally fail to stop this run (the new run will handle the rest)
 
-  # ---------------------------------------------------------
-  # LAYER 2: Hybrid Syntax Auditor (Python + AI)
-  # ---------------------------------------------------------
-  syntax-check:
-    runs-on: ubuntu-latest
-    needs: integrity-check
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+#   # ---------------------------------------------------------
+#   # LAYER 2: Hybrid Syntax Auditor (Python + AI)
+#   # ---------------------------------------------------------
+#   syntax-check:
+#     runs-on: ubuntu-latest
+#     needs: integrity-check
+#     steps:
+#       - name: Checkout Code
+#         uses: actions/checkout@v4
 
-      - name: 🤖 Hybrid Syntax Scan
-        id: ai_scan
-        run: |
-          python3 -c "
-          import os, json, urllib.request, re, glob
+#       - name: 🤖 Hybrid Syntax Scan
+#         id: ai_scan
+#         run: |
+#           python3 -c "
+#           import os, json, urllib.request, re, glob
 
-          api_key = '${{ env.GEMINI_API_KEY }}'
-          files_to_check = glob.glob('*.html') + glob.glob('*.css') + glob.glob('*.js')
+#           api_key = '${{ env.GEMINI_API_KEY }}'
+#           files_to_check = glob.glob('*.html') + glob.glob('*.css') + glob.glob('*.js')
 
-          fixed_any = False
+#           fixed_any = False
 
-          for filename in files_to_check:
-              print(f'🔍 Scanning {filename}...')
-              with open(filename, 'r') as f:
-                  code = f.read()
+#           for filename in files_to_check:
+#               print(f'🔍 Scanning {filename}...')
+#               with open(filename, 'r') as f:
+#                   code = f.read()
 
-              # 🛡️ LEVEL 1: Python Hard-Checks (Deterministic)
-              # Force specific rules that AI might miss.
-              if filename.endswith('.html'):
-                  if '</html>' not in code:
-                      print(f'🚨 Rule Violation: {filename} is missing </html> tag.')
-                      print('🔧 Applying Hard-Fix: Appending </html>...')
-                      code = code + '\n</html>'
-                      with open(filename, 'w') as f: f.write(code)
-                      fixed_any = True
+#               # 🛡️ LEVEL 1: Python Hard-Checks (Deterministic)
+#               # Force specific rules that AI might miss.
+#               if filename.endswith('.html'):
+#                   if '</html>' not in code:
+#                       print(f'🚨 Rule Violation: {filename} is missing </html> tag.')
+#                       print('🔧 Applying Hard-Fix: Appending </html>...')
+#                       code = code + '\n</html>'
+#                       with open(filename, 'w') as f: f.write(code)
+#                       fixed_any = True
                   
-                  if '</body>' not in code:
-                      print(f'🚨 Rule Violation: {filename} is missing </body> tag.')
-                      print('🔧 Applying Hard-Fix: Appending </body>...')
-                      code = code + '\n</body>'
-                      with open(filename, 'w') as f: f.write(code)
-                      fixed_any = True
+#                   if '</body>' not in code:
+#                       print(f'🚨 Rule Violation: {filename} is missing </body> tag.')
+#                       print('🔧 Applying Hard-Fix: Appending </body>...')
+#                       code = code + '\n</body>'
+#                       with open(filename, 'w') as f: f.write(code)
+#                       fixed_any = True
 
-              # 🛡️ LEVEL 2: AI Audit (Contextual)
-              prompt = f'''
-              Act as a STRICT CODE REVIEWER.
-              Analyze this code for SYNTAX ERRORS (unclosed brackets, typos, invalid logic).
+#               # 🛡️ LEVEL 2: AI Audit (Contextual)
+#               prompt = f'''
+#               Act as a STRICT CODE REVIEWER.
+#               Analyze this code for SYNTAX ERRORS (unclosed brackets, typos, invalid logic).
               
-              filename: {filename}
-              code:
-              {code}
+#               filename: {filename}
+#               code:
+#               {code}
 
-              If the code is perfect, output ONLY the word: VALID
-              If there are ANY errors, output ONLY the full corrected code.
-              Do not include markdown.
-              '''
+#               If the code is perfect, output ONLY the word: VALID
+#               If there are ANY errors, output ONLY the full corrected code.
+#               Do not include markdown.
+#               '''
 
-              url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}'
-              headers = {'Content-Type': 'application/json'}
-              data = {'contents': [{'parts': [{'text': prompt}]}]}
+#               url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}'
+#               headers = {'Content-Type': 'application/json'}
+#               data = {'contents': [{'parts': [{'text': prompt}]}]}
               
-              try:
-                  req = urllib.request.Request(url, json.dumps(data).encode('utf-8'), headers)
-                  with urllib.request.urlopen(req) as response:
-                      result = json.loads(response.read().decode())
+#               try:
+#                   req = urllib.request.Request(url, json.dumps(data).encode('utf-8'), headers)
+#                   with urllib.request.urlopen(req) as response:
+#                       result = json.loads(response.read().decode())
                       
-                      if 'candidates' in result and result['candidates']:
-                          ai_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
+#                       if 'candidates' in result and result['candidates']:
+#                           ai_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
                           
-                          ai_text = re.sub(r'^```\w*', '', ai_text).strip()
-                          ai_text = re.sub(r'```$', '', ai_text).strip()
+#                           ai_text = re.sub(r'^```\w*', '', ai_text).strip()
+#                           ai_text = re.sub(r'```$', '', ai_text).strip()
 
-                          if ai_text == 'VALID':
-                              print(f'✅ {filename} passed AI check.')
-                          elif len(ai_text) > 10: 
-                              print(f'⚠️ AI found further issues in {filename}. Applying fix...')
-                              with open(filename, 'w') as f:
-                                  f.write(ai_text)
-                              fixed_any = True
-                      else:
-                          print(f'⚠️ No AI response for {filename}')
+#                           if ai_text == 'VALID':
+#                               print(f'✅ {filename} passed AI check.')
+#                           elif len(ai_text) > 10: 
+#                               print(f'⚠️ AI found further issues in {filename}. Applying fix...')
+#                               with open(filename, 'w') as f:
+#                                   f.write(ai_text)
+#                               fixed_any = True
+#                       else:
+#                           print(f'⚠️ No AI response for {filename}')
                           
-              except Exception as e:
-                  print(f'AI Error: {e}')
+#               except Exception as e:
+#                   print(f'AI Error: {e}')
 
-          if fixed_any:
-              with open('syntax_fixed.flag', 'w') as f: f.write('true')
-          "
+#           if fixed_any:
+#               with open('syntax_fixed.flag', 'w') as f: f.write('true')
+#           "
 
-      - name: Commit Fix (If needed)
-        run: |
-          if [ -f "syntax_fixed.flag" ]; then
-            git config user.name "Syntax Bot"
-            git config user.email "bot@github.com"
-            git add .
-            git commit -m "🚑 Layer 2: Pipeline fixed syntax errors"
-            git push
-            echo "🔄 Fix pushed. Stopping this run to let the new run take over."
-            exit 1 
-          fi
+#       - name: Commit Fix (If needed)
+#         run: |
+#           if [ -f "syntax_fixed.flag" ]; then
+#             git config user.name "Syntax Bot"
+#             git config user.email "bot@github.com"
+#             git add .
+#             git commit -m "🚑 Layer 2: Pipeline fixed syntax errors"
+#             git push
+#             echo "🔄 Fix pushed. Stopping this run to let the new run take over."
+#             exit 1 
+#           fi
 
-  # ---------------------------------------------------------
-  # LAYER 3: Deployment & Deep Healing
-  # ---------------------------------------------------------
-  deploy:
-    runs-on: ubuntu-latest
-    needs: [integrity-check, syntax-check]
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+#   # ---------------------------------------------------------
+#   # LAYER 3: Deployment & Deep Healing
+#   # ---------------------------------------------------------
+#   deploy:
+#     runs-on: ubuntu-latest
+#     needs: [integrity-check, syntax-check]
+#     steps:
+#       - name: Checkout Code
+#         uses: actions/checkout@v4
 
-      - name: Install Vercel CLI
-        run: npm install -g vercel@latest
+#       - name: Install Vercel CLI
+#         run: npm install -g vercel@latest
 
-      - id: deploy_step
-        name: Deploy to Vercel
-        shell: bash
-        run: |
-          set +e 
-          echo "🚀 Starting Deployment..."
-          OUTPUT=$(vercel --prod --confirm --token "${{ secrets.VERCEL_TOKEN }}" 2>&1)
-          CODE=$?
-          echo "$OUTPUT" > deploy_error.txt
+#       - id: deploy_step
+#         name: Deploy to Vercel
+#         shell: bash
+#         run: |
+#           set +e 
+#           echo "🚀 Starting Deployment..."
+#           OUTPUT=$(vercel --prod --confirm --token "${{ secrets.VERCEL_TOKEN }}" 2>&1)
+#           CODE=$?
+#           echo "$OUTPUT" > deploy_error.txt
           
-          if [ "$CODE" -eq 0 ]; then
-            echo "✅ Deployment Successful!"
-          else
-            echo "❌ Deployment Failed!"
-            echo "::set-output name=failed::true"
-            exit 1 # Fail so we move to healing
-          fi
+#           if [ "$CODE" -eq 0 ]; then
+#             echo "✅ Deployment Successful!"
+#           else
+#             echo "❌ Deployment Failed!"
+#             echo "::set-output name=failed::true"
+#             exit 1 # Fail so we move to healing
+#           fi
 
-      - name: Upload Logs (If Failed)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: error-context
-          path: |
-            deploy_error.txt
-            index.html
+#       - name: Upload Logs (If Failed)
+#         if: failure()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: error-context
+#           path: |
+#             deploy_error.txt
+#             index.html
 
-  deep-heal:
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: failure() # Runs only if Deploy fails
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+#   deep-heal:
+#     runs-on: ubuntu-latest
+#     needs: deploy
+#     if: failure() # Runs only if Deploy fails
+#     steps:
+#       - name: Checkout Code
+#         uses: actions/checkout@v4
 
-      - name: Download Logs
-        uses: actions/download-artifact@v4
-        with:
-          name: error-context
+#       - name: Download Logs
+#         uses: actions/download-artifact@v4
+#         with:
+#           name: error-context
 
-      - name: 🤖 Deep Heal (Logs + Code)
-        run: |
-          python3 -c "
-          import os, json, urllib.request, re
-          api_key = '${{ env.GEMINI_API_KEY }}'
+#       - name: 🤖 Deep Heal (Logs + Code)
+#         run: |
+#           python3 -c "
+#           import os, json, urllib.request, re
+#           api_key = '${{ env.GEMINI_API_KEY }}'
           
-          # Safely read logs
-          error_log = 'No Log Found'
-          if os.path.exists('deploy_error.txt'):
-              with open('deploy_error.txt', 'r') as f: error_log = f.read()[-2000:]
+#           # Safely read logs
+#           error_log = 'No Log Found'
+#           if os.path.exists('deploy_error.txt'):
+#               with open('deploy_error.txt', 'r') as f: error_log = f.read()[-2000:]
           
-          # Safely read source code
-          source_code = 'File missing'
-          if os.path.exists('index.html'):
-             with open('index.html', 'r') as f: source_code = f.read()
+#           # Safely read source code
+#           source_code = 'File missing'
+#           if os.path.exists('index.html'):
+#              with open('index.html', 'r') as f: source_code = f.read()
 
-          print('--- DEBUG INFO ---')
-          print(f'Log Length: {len(error_log)}')
-          print(f'Code Length: {len(source_code)}')
+#           print('--- DEBUG INFO ---')
+#           print(f'Log Length: {len(error_log)}')
+#           print(f'Code Length: {len(source_code)}')
 
-          prompt = f'''
-          The Vercel deployment failed.
-          LOGS: {error_log}
-          CODE: {source_code}
+#           prompt = f'''
+#           The Vercel deployment failed.
+#           LOGS: {error_log}
+#           CODE: {source_code}
           
-          Task: Fix the code to resolve the deployment error.
-          Output ONLY the fixed code. No markdown.
-          '''
+#           Task: Fix the code to resolve the deployment error.
+#           Output ONLY the fixed code. No markdown.
+#           '''
           
-          url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}'
-          headers = {'Content-Type': 'application/json'}
-          data = {'contents': [{'parts': [{'text': prompt}]}]}
+#           url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}'
+#           headers = {'Content-Type': 'application/json'}
+#           data = {'contents': [{'parts': [{'text': prompt}]}]}
           
-          try:
-              req = urllib.request.Request(url, json.dumps(data).encode('utf-8'), headers)
-              with urllib.request.urlopen(req) as resp:
-                  result = json.loads(resp.read().decode())
+#           try:
+#               req = urllib.request.Request(url, json.dumps(data).encode('utf-8'), headers)
+#               with urllib.request.urlopen(req) as resp:
+#                   result = json.loads(resp.read().decode())
                   
-                  # 🛡️ SAFETY CHECK: Did we get an error?
-                  if 'error' in result:
-                      print('❌ API Error: ' + str(result.get('error')))
-                      exit(1)
+#                   # 🛡️ SAFETY CHECK: Did we get an error?
+#                   if 'error' in result:
+#                       print('❌ API Error: ' + str(result.get('error')))
+#                       exit(1)
                       
-                  # 🛡️ SAFETY CHECK: Do we have candidates?
-                  if 'candidates' not in result or not result['candidates']:
-                      print('❌ No fix generated. API returned empty candidates.')
-                      print(json.dumps(result, indent=2))
-                      exit(0)
+#                   # 🛡️ SAFETY CHECK: Do we have candidates?
+#                   if 'candidates' not in result or not result['candidates']:
+#                       print('❌ No fix generated. API returned empty candidates.')
+#                       print(json.dumps(result, indent=2))
+#                       exit(0)
 
-                  ai_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
+#                   ai_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
                   
-                  # Clean markdown
-                  ai_text = re.sub(r'^```\w*', '', ai_text).strip()
-                  ai_text = re.sub(r'```$', '', ai_text).strip()
+#                   # Clean markdown
+#                   ai_text = re.sub(r'^```\w*', '', ai_text).strip()
+#                   ai_text = re.sub(r'```$', '', ai_text).strip()
                   
-                  if len(ai_text) > 10:
-                      print('✅ Fix generated! Applying to index.html...')
-                      with open('index.html', 'w') as f: f.write(ai_text)
-                      with open('deep_fix.flag', 'w') as f: f.write('true')
-                  else:
-                      print('⚠️ AI response was too short to be code.')
+#                   if len(ai_text) > 10:
+#                       print('✅ Fix generated! Applying to index.html...')
+#                       with open('index.html', 'w') as f: f.write(ai_text)
+#                       with open('deep_fix.flag', 'w') as f: f.write('true')
+#                   else:
+#                       print('⚠️ AI response was too short to be code.')
                       
-          except Exception as e:
-              print(f'❌ Python Script Crash: {e}')
-              exit(1)
-          "
+#           except Exception as e:
+#               print(f'❌ Python Script Crash: {e}')
+#               exit(1)
+#           "
 
-      - name: Commit Deep Fix
-        run: |
-          if [ -f "deep_fix.flag" ]; then
-             git config user.name "Deep Heal Bot"
-             git config user.email "bot@github.com"
-             git add index.html
-             git commit -m "🚑 Layer 3: AI fixed deployment error from logs"
-             git push
-          fi
+#       - name: Commit Deep Fix
+#         run: |
+#           if [ -f "deep_fix.flag" ]; then
+#              git config user.name "Deep Heal Bot"
+#              git config user.email "bot@github.com"
+#              git add index.html
+#              git commit -m "🚑 Layer 3: AI fixed deployment error from logs"
+#              git push
+#           fi
 
-  # ---------------------------------------------------------
-  # Validation Layer
-  # ---------------------------------------------------------
-  verify-live:
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: success()
-    steps:
-      - name: Check Live URL
-        run: |
-          echo "Checking ${{ env.SITE_URL }}..."
-          CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${{ env.SITE_URL }}" || echo "000")
-          if [ "$CODE" = "200" ]; then
-            echo "✅ Live Site is Healthy (200 OK)"
-          else
-            echo "⚠️ Live Site returned $CODE"
-            exit 1
-          fi
+#   # ---------------------------------------------------------
+#   # Validation Layer
+#   # ---------------------------------------------------------
+#   verify-live:
+#     runs-on: ubuntu-latest
+#     needs: deploy
+#     if: success()
+#     steps:
+#       - name: Check Live URL
+#         run: |
+#           echo "Checking ${{ env.SITE_URL }}..."
+#           CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${{ env.SITE_URL }}" || echo "000")
+#           if [ "$CODE" = "200" ]; then
+#             echo "✅ Live Site is Healthy (200 OK)"
+#           else
+#             echo "⚠️ Live Site returned $CODE"
+#             exit 1
+#           fi
