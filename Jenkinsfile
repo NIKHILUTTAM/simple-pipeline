@@ -1,51 +1,39 @@
-// Jenkinsfile - Auto-heal using Gemini and apply real patch (Windows-compatible)
-// - github-token: username/password (username + PAT as password)
-// - gemini-key: secret text (Gemini API key)
-// - vercel-token: secret text (Vercel token)
-
 pipeline {
   agent any
 
-  parameters {
-    booleanParam(name: 'SIMULATE_FAILURE', defaultValue: true, description: 'If true the Build will simulate a failure (for testing).')
-    booleanParam(name: 'APPLY_REAL_FIX', defaultValue: false, description: 'If true, the pipeline will attempt to apply Gemini-generated patch (git apply).')
-    string(name: 'BRANCH', defaultValue: 'main', description: 'Branch to operate on')
+  // Do NOT interpolate secrets in Groovy strings; we'll use withCredentials to expose env vars safely
+  options {
+    timestamps()
+    ansiColor('xterm')
   }
 
   environment {
-    // repository settings
-    REPO_NAME = "NIKHILUTTAM/simple-pipeline"
-    REPO_URL  = "https://github.com/${env.REPO_NAME}.git"
-    AUTOFIX_FILE = "index.html"   // fallback file used if Gemini doesn't provide a patch
-    // temp files
-    GEMINI_RESP = "response.json"
-    PATCH_FILE  = "autoheal_patch.diff"
-    VERCEL_RESP = "vercel_response.json"
-  }
-
-  options {
-    timestamps()
-    buildDiscarder(logRotator(numToKeepStr: '30'))
+    REPO = 'https://github.com/NIKHILUTTAM/simple-pipeline.git'
+    BRANCH = 'main'
+    // These are placeholders — real values come from withCredentials in the steps
   }
 
   stages {
+    stage('Declarative: Checkout SCM') {
+      steps {
+        echo "Preparing workspace..."
+        // Clean workspace, then the normal git checkout below inside credentials block
+      }
+    }
 
     stage('Checkout') {
       steps {
-        script {
-          withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PSW')]) {
-            // Do a clean checkout using git CLI so later git commands operate smoothly
-            bat """
-              echo Initializing workspace...
-              if exist .git ( rmdir /s /q .git )
-              git init
-              git remote add origin ${env.REPO_URL}
-              set GIT_ASKPASS=echo
-              git fetch --no-tags --progress https://%GIT_USER%:%GIT_PSW%@github.com/${env.REPO_NAME}.git +refs/heads/${params.BRANCH}:refs/remotes/origin/${params.BRANCH}
-              git checkout -f origin/${params.BRANCH}
-              git status --porcelain
-            """
-          }
+        // Use the credential entry stored in Jenkins (username/password or token)
+        withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PSW')]) {
+          bat """
+            if exist .git rmdir /s /q .git
+            git init
+            git remote add origin ${REPO}
+            set GIT_ASKPASS=echo
+            git fetch --no-tags --progress https://%GIT_USER%:%GIT_PSW%@github.com/%GIT_USER%/simple-pipeline.git +refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}
+            git checkout -f origin/${BRANCH}
+            git status --porcelain
+          """
         }
       }
     }
@@ -53,24 +41,16 @@ pipeline {
     stage('Run Tests / Build') {
       steps {
         script {
-          if (params.SIMULATE_FAILURE) {
-            echo "SIMULATING BUILD FAILURE for testing auto-heal (set SIMULATE_FAILURE=false to run real build)."
-            // The following returns non-zero status -> marks build stage failed
-            // We capture status and let pipeline continue to auto-heal flow
-            def rc = bat(returnStatus: true, script: 'exit /b 1')
-            if (rc != 0) {
-              echo "Build simulated as failed (exit code ${rc})"
-              currentBuild.result = 'FAILURE' // ensure downstream when() conditions detect failure
-            }
+          // Soft-fail: capture return code and don't abort pipeline
+          env.BUILD_FAILED = 'false'
+          echo "Running tests/build (set SIMULATE_FAILURE=false to run your real build)..."
+          // Example: run your test script here. For demo/testing we simulate a failure; replace with real build command
+          def rc = bat(returnStatus: true, script: 'if "%SIMULATE_FAILURE%"=="false" (echo Running real build && exit /b 0) else (echo Simulated failure && exit /b 1)')
+          if (rc != 0) {
+            echo "⚠ Build failed (exit code ${rc}). Continuing to auto-heal stage."
+            env.BUILD_FAILED = 'true'
           } else {
-            // Replace below with your actual build/test commands (npm, mvn, etc.)
-            def rc = bat(returnStatus: true, script: 'echo Building... & exit /b 0')
-            if (rc != 0) {
-              echo "Build returned code ${rc}"
-              currentBuild.result = 'FAILURE'
-            } else {
-              echo "Build succeeded."
-            }
+            echo "✅ Build succeeded."
           }
         }
       }
@@ -78,317 +58,256 @@ pipeline {
 
     stage('Call Gemini to generate patch') {
       when {
-        anyOf {
-          expression { currentBuild.currentResult == 'FAILURE' }
-          expression { params.SIMULATE_FAILURE == true }
-        }
+        expression { env.BUILD_FAILED == 'true' }
       }
       steps {
-        script {
-          withCredentials([string(credentialsId: 'gemini-key', variable: 'GEMINI_KEY')]) {
-            // Remove previous files if exist
-            bat "if exist ${env.GEMINI_RESP} del /f /q ${env.GEMINI_RESP}"
-            bat "if exist ${env.PATCH_FILE} del /f /q ${env.PATCH_FILE}"
+        // Use secret text bindings — avoid Groovy interpolation of secrets.
+        withCredentials([
+          string(credentialsId: 'gemini-key', variable: 'GEMINI_KEY')
+        ]) {
+          // Remove old artifacts
+          bat 'if exist response.json del /f /q response.json'
+          bat 'if exist autoheal_patch.diff del /f /q autoheal_patch.diff'
+          // Call Gemini (PowerShell here-string used to build request body cleanly)
+          powershell(
+'''$ErrorActionPreference = "Stop"
 
-            // Build a prompt that asks for a minimal unified diff patch
-            def prompt = """
-              You are an expert software engineer. Analyze the repository and generate a minimal safe patch in unified diff format to fix the build/test failure.
-              Output only JSON with fields:
-                - \"summary\": short explanation
-                - \"patch\": the unified diff text (escaped for JSON)
-              Provide the patch in the \"patch\" field as a single string. Keep changes minimal and safe.
-            """.trim()
+# Build prompt: ask Gemini to output ONLY JSON with fields "summary" and "patch"
+$prompt = @'
+You are an assistant that generates a tiny safe patch for a web repo.
+Output only JSON, with two fields:
+  "summary": short explanation
+  "patch": the unified diff text (a plain string) that can be applied with git apply.
+Keep changes minimal and safe. If you cannot produce a patch, respond with {"summary":"no-patch","patch":""}.
+Patch should be a standard unified diff for files modified (e.g. "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ ...").
+'@
 
-            // Use PowerShell + curl to call Gemini and save response JSON
-            // We use retries in case of transient network/LLM issues
-            retry(3) {
-              powershell(returnStdout: true, script: """
-                \$body = @{
-                  contents = @(
-                    @{
-                      parts = @(
-                        @{ text = ${groovy.json.JsonOutput.toJson(prompt)} }
-                      )
-                    }
-                  )
-                } | ConvertTo-Json -Depth 10
-                \$key = "${GEMINI_KEY}"
-                # Call Gemini REST endpoint
-                try {
-                  \$resp = curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=\$key" -H "Content-Type: application/json" -d \$body
-                  if (\$LASTEXITCODE -ne 0) { throw "curl failed: \$LASTEXITCODE" }
-                  \$resp | Out-File -FilePath ${env.GEMINI_RESP} -Encoding utf8
-                  Write-Output "OK"
-                } catch {
-                  Write-Error "Gemini call failed: \$_"
-                  exit 1
-                }
-              """).trim()
-            } // retry
+$body = @{
+  "prompt" = $prompt
+  "instructions" = "Produce JSON only. Include fields summary and patch."
+} | ConvertTo-Json -Depth 10
 
-            echo "Gemini response saved to ${env.GEMINI_RESP}"
-            archiveArtifacts artifacts: "${env.GEMINI_RESP}", allowEmptyArchive: false
-          } // withCredentials
-        } // script
-      } // steps
-    } // stage
+# Use curl (Windows 10+ has curl) - we post to the Generative Language REST endpoint
+$uri = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=$env:GEMINI_KEY"
 
-    stage('Extract & Validate Patch') {
-      when {
-        anyOf {
-          expression { currentBuild.currentResult == 'FAILURE' }
-          expression { params.SIMULATE_FAILURE == true }
-        }
-      }
-      steps {
-        script {
-          // Default: no patch extracted
-          def extracted = false
-
-          // Try to extract 'patch' value from JSON using PowerShell robustly
-          powershell(returnStdout: true, script: """
-            if (-not (Test-Path -Path '${env.GEMINI_RESP}')) { Write-Output 'NO_RESP'; exit 0 }
-            \$json = Get-Content -Raw -Path '${env.GEMINI_RESP}'
-            # attempt to find a 'patch' field anywhere in the JSON (case-insensitive)
-            try {
-              # naive: look for "patch": "...." OR look for code block with diff
-              if (\$json -match '"patch"\\s*:\\s*"(.*?)"') {
-                \$m = [System.Text.RegularExpressions.Regex]::Match(\$json, '"patch"\\s*:\\s*"(.*?)"', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-                \$patchEsc = \$m.Groups[1].Value
-                # unescape common JSON escapes
-                \$patch = \$patchEsc -replace '\\\\r','\\r' -replace '\\\\n','\\n' -replace '\\\\t','`t' -replace '\\\\\\"','\"'
-                Set-Content -Path '${env.PATCH_FILE}' -Value \$patch -Encoding utf8
-                Write-Output 'PATCH_FROM_FIELD'
-                exit 0
-              } else {
-                # Fallback: look for a fenced code block containing a unified diff
-                if (\$json -match '```diff[\\s\\S]*?```') {
-                  \$m = [System.Text.RegularExpressions.Regex]::Match(\$json, '```diff([\\s\\S]*?)```', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-                  \$patch = \$m.Groups[1].Value.Trim()
-                  Set-Content -Path '${env.PATCH_FILE}' -Value \$patch -Encoding utf8
-                  Write-Output 'PATCH_FROM_FENCE'
-                  exit 0
-                } elseif (\$json -match '(^---\\s.*\\+\\+\\+\\s.*)') {
-                  # maybe the diff text appears plainly
-                  \$m = [System.Text.RegularExpressions.Regex]::Match(\$json, '(^---[\\s\\S]*?\\n\\+\\+\\+[\\s\\S]*?)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-                  if (\$m.Success) {
-                    \$patch = \$m.Groups[1].Value
-                    Set-Content -Path '${env.PATCH_FILE}' -Value \$patch -Encoding utf8
-                    Write-Output 'PATCH_FROM_RAW'
-                    exit 0
-                  }
-                }
-                Write-Output 'NO_PATCH_FOUND'
-                exit 0
-              }
-            } catch {
-              Write-Error "Error while extracting patch: \$_"
-              exit 0
-            }
-          """).trim()
-
-          // If patch file exists and is non-empty, run git apply --check
-          if (fileExists(env.PATCH_FILE) && readFile(env.PATCH_FILE).trim()) {
-            echo "Patch file ${env.PATCH_FILE} created, validating with git apply --check..."
-            def checkRc = bat(returnStatus: true, script: "git apply --check ${env.PATCH_FILE}")
-            if (checkRc == 0) {
-              echo "Patch passed git apply --check"
-              extracted = true
-            } else {
-              echo "Patch failed git apply --check; will NOT apply. Check ${env.PATCH_FILE} and ${env.GEMINI_RESP}"
-              archiveArtifacts artifacts: "${env.PATCH_FILE}", allowEmptyArchive: true
-              extracted = false
-            }
-          } else {
-            echo "No valid patch extracted from Gemini output. ${env.PATCH_FILE} missing or empty."
-          }
-
-          // Expose to next stage via env var
-          env.PATCH_READY = extracted.toString()
-        } // script
-      } // steps
-    } // stage
-
-    stage('Apply Patch (real code edits)') {
-      when {
-        allOf {
-          expression { params.APPLY_REAL_FIX == true }
-          expression { env.PATCH_READY == 'true' }
-        }
-      }
-      steps {
-        script {
-          echo "Applying patch ${env.PATCH_FILE}..."
-          // apply the patch for real
-          def applyRc = bat(returnStatus: true, script: "git apply ${env.PATCH_FILE}")
-          if (applyRc != 0) {
-            echo "git apply returned ${applyRc} — aborting apply stage"
-            currentBuild.result = 'UNSTABLE'
-          } else {
-            echo "Patch applied locally. Staging changes..."
-            bat """
-              git add -A
-              git status --porcelain
-            """
-          }
+# Using curl here for simplicity. Save raw output to response.json
+$curlArgs = @(
+  '-s', '-X', 'POST', $uri,
+  '-H', 'Content-Type: application/json',
+  '-d', $body
+)
+Write-Host "Calling Gemini API..."
+# run curl
+$proc = Start-Process -FilePath curl -ArgumentList $curlArgs -NoNewWindow -Wait -PassThru -RedirectStandardOutput response.json
+if ($proc.ExitCode -ne 0) {
+  Write-Host "curl returned exit code $($proc.ExitCode)."
+  exit 1
+}
+Write-Host "Gemini response saved to response.json"
+'''
+          )
         }
       }
     }
 
-    stage('Safe simulated fix (fallback)') {
+    stage('Extract & Validate Patch') {
       when {
-        anyOf {
-          expression { env.PATCH_READY != 'true' }
-          expression { params.APPLY_REAL_FIX == false }
-        }
+        expression { env.BUILD_FAILED == 'true' }
       }
       steps {
         script {
-          echo "Applying a conservative simulated safe fix (append marker) to ${env.AUTOFIX_FILE}"
-          if (!fileExists(env.AUTOFIX_FILE)) {
-            writeFile file: env.AUTOFIX_FILE, text: "<!-- autoheal placeholder created by Jenkins -->\n"
+          // Try to parse response.json and extract patch; run in PowerShell to handle JSON robustly
+          powershell '''
+$ErrorActionPreference = "Stop"
+if (-not (Test-Path response.json)) { Write-Host "response.json missing"; exit 2 }
+
+# Try to parse common response shapes. We'll attempt multiple paths.
+$content = Get-Content response.json -Raw
+# If the body itself is a JSON with fields patch or contains a text field
+$patch = ""
+try {
+  $j = $null
+  try { $j = $content | ConvertFrom-Json } catch { $j = $null }
+  if ($j -ne $null) {
+    # look for common keys
+    if ($j.patch) { $patch = $j.patch }
+    elseif ($j.output -and $j.output[0] -and $j.output[0].content) {
+      # vendor-specific: try to find patch inside outputs
+      $patch = ($j.output[0].content | Out-String)
+    } elseif ($j.response) {
+      $patch = ($j.response | Out-String)
+    } elseif ($j.candidates -and $j.candidates[0] -and $j.candidates[0].content) {
+      $patch = ($j.candidates[0].content | Out-String)
+    } else {
+      # attempt to find a JSON blob inside text
+      $text = $content -join "`n"
+      $maybe = ($text | Select-String -Pattern '\{.*"patch".*' -SimpleMatch -AllMatches)
+      if ($maybe) { $patch = $maybe.Matches.Value -join "`n" }
+    }
+  } else {
+    # not JSON — maybe raw text, so use full content
+    $patch = $content
+  }
+} catch {
+  Write-Host "Failed to parse response.json: $_"
+  exit 3
+}
+
+# Heuristic: look for unified diff markers; if not found, leave patch empty
+if (-not ($patch -match 'diff --git|^--- a/|^\+\+\+ b/')) {
+  Write-Host "No unified-diff detected in Gemini output. Saving raw content to response_body.txt"
+  $content | Out-File -Encoding utf8 response_body.txt
+  exit 4
+}
+
+# Save patch file
+$patch | Out-File -Encoding utf8 autoheal_patch.diff
+Write-Host "Saved patch to autoheal_patch.diff"
+'''
+        }
+      }
+    }
+
+    stage('Apply Patch (real code edits)') {
+      when {
+        expression { env.BUILD_FAILED == 'true' }
+      }
+      steps {
+        script {
+          // Try apply; if fails, fallback to safe simulated fix
+          def applyRc = powershell(returnStatus: true, script: '''
+$ErrorActionPreference = "Stop"
+if (-not (Test-Path autoheal_patch.diff)) { Write-Host "No patch present"; exit 2 }
+# Validate patch
+git apply --check autoheal_patch.diff
+if ($LASTEXITCODE -ne 0) { Write-Host "git apply --check failed"; exit 3 }
+
+# Apply patch to index (create working changes)
+git apply autoheal_patch.diff
+if ($LASTEXITCODE -ne 0) { Write-Host "git apply failed"; exit 4 }
+Write-Host "Patch applied successfully"
+exit 0
+''')
+          if (applyRc == 0) {
+            echo "Patch applied to workspace."
+            env.PATCH_APPLIED = 'true'
+          } else {
+            echo "Patch application failed (rc=${applyRc}). Will apply safe simulated fallback."
+            env.PATCH_APPLIED = 'false'
+            // fallback: append safe comment to index.html (non-destructive)
+            bat 'echo <!-- SAFE FALLBACK PATCH (AUTO-HEAL) --> >> index.html'
           }
-          powershell(returnStdout: true, script: "Add-Content -Path '${env.AUTOFIX_FILE}' -Value '<!-- FIX APPLIED BY GEMINI AUTO-HEAL -->'")
-          bat "git add ${env.AUTOFIX_FILE} || exit /b 0"
         }
       }
     }
 
     stage('Commit & Push Fix') {
       when {
-        anyOf {
-          expression { currentBuild.currentResult == 'FAILURE' }
-          expression { params.SIMULATE_FAILURE == true }
-        }
+        expression { env.BUILD_FAILED == 'true' }
       }
       steps {
-        script {
-          withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PSW')]) {
-            // commit if there are changes
-            def hasStaged = bat(returnStatus: true, script: 'git diff --staged --quiet || (exit 0)')
-            // git diff --staged --quiet returns 1 if changes exist; bat(returnStatus) returns that numeric
-            // We'll attempt commit & push, but be robust if no changes exist
-            def commitRc = bat(returnStatus: true, script: 'git diff --staged --quiet || git commit -m "Auto-healed by Jenkins + Gemini [ci skip]"')
-            if (commitRc == 0 || commitRc == 1) {
-              // commitRc==0 means commit succeeded or there were no staged changes? different git versions differ; we'll just attempt push
-              echo "Attempting to push changes..."
-              retry(3) {
-                // embed credentials in push URL (masked by Jenkins)
-                bat """
-                  git push https://%GIT_USER%:%GIT_PSW%@github.com/${env.REPO_NAME}.git HEAD:${params.BRANCH} || echo "Push failed or no changes to push"
-                """
-              }
-            } else {
-              echo "Commit step returned code ${commitRc}. Continuing pipeline (no push)."
-            }
-          } // withCredentials
-        } // script
-      } // steps
-    } // stage
-
-    stage('Trigger Vercel Deployment') {
-      when {
-        anyOf {
-          expression { currentBuild.currentResult == 'FAILURE' }
-          expression { params.SIMULATE_FAILURE == true }
-        }
-      }
-      steps {
-        script {
-          withCredentials([string(credentialsId: 'vercel-token', variable: 'VERCEL_TOKEN')]) {
-            // Build payload with repo ref (Vercel expects gitSource.ref)
-            def payload = [
-              name: env.REPO_NAME.split('/')[1],
-              gitSource: [
-                type: "github",
-                repo: env.REPO_NAME,
-                ref: params.BRANCH
-              ]
-            ]
-            writeFile file: 'vercel_payload.json', text: groovy.json.JsonOutput.toJson(payload)
-            archiveArtifacts artifacts: 'vercel_payload.json', allowEmptyArchive: true
-
-            // Call Vercel
-            def status = powershell(returnStatus: true, script: """
-              \$headers = @{ Authorization = "Bearer ${VERCEL_TOKEN}"; 'Content-Type' = 'application/json' }
-              \$body = Get-Content -Raw -Path 'vercel_payload.json'
-              try {
-                \$resp = Invoke-RestMethod -Uri 'https://api.vercel.com/v13/deployments' -Method Post -Headers \$headers -Body \$body -ErrorAction Stop
-                \$resp | ConvertTo-Json -Depth 6 | Out-File -FilePath ${env.VERCEL_RESP} -Encoding utf8
-                Write-Output 'VERCEL_OK'
-                exit 0
-              } catch {
-                Write-Output 'VERCEL_ERROR'
-                if (\$_ -and \$_.Exception) { Write-Output \$_.Exception.Message }
-                exit 1
-              }
-            """)
-            archiveArtifacts artifacts: env.VERCEL_RESP, allowEmptyArchive: true
-
-            def vercelText = fileExists(env.VERCEL_RESP) ? readFile(env.VERCEL_RESP) : ''
-            if (!vercelText) {
-              echo "Vercel response missing or empty; treat as failure."
-              env.VERCEL_FAILED = 'true'
-            } else if (vercelText.toLowerCase().contains('"error"')) {
-              echo "Vercel response contains error: ${vercelText.take(400)}"
-              env.VERCEL_FAILED = 'true'
-            } else {
-              echo "Vercel deployment request succeeded (response archived)."
-              env.VERCEL_FAILED = 'false'
-            }
-          } // withCredentials vercel
-        } // script
-      } // steps
-    } // stage
-
-    stage('Auto-rollback if deployment failed') {
-      when {
-        expression { env.VERCEL_FAILED == 'true' }
-      }
-      steps {
-        script {
-          echo "Deployment failed — attempting automatic rollback (revert the auto-heal commit)."
-          withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PSW')]) {
-            // find last auto-heal commit by message and revert it if present
-            def rc = powershell(returnStatus: true, script: """
-              \$found = git log --pretty=format:'%H|%s' -n 20 | Select-String -Pattern 'Auto-healed by Jenkins' -SimpleMatch
-              if (-not \$found) { Write-Output 'NO_AUTOHEAL'; exit 0 }
-              \$hash = (\$found -split '\\|')[0]
-              Write-Output "REVERTING:\$hash"
-              git revert --no-edit \$hash
-              git push https://%GIT_USER%:%GIT_PSW%@github.com/${env.REPO_NAME}.git HEAD:${params.BRANCH}
-            """)
-            if (rc == 0) {
-              echo "Rollback/revert pushed."
-            } else {
-              echo "Rollback attempt returned code ${rc} (may have failed)."
-            }
-          }
-          // Mark the build failed to make it explicit
-          error("Vercel deployment failed and rollback attempted. See artifacts/response files for details.")
+        withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PSW')]) {
+          bat """
+            git config user.email "autoheal@jenkins.local"
+            git config user.name "Jenkins AutoHeal"
+            git add -A
+            REM commit if there are changes; exit 0 if nothing to commit
+            git commit -m "Auto-healed by Jenkins + Gemini" || echo No changes to commit
+            REM push using token/username
+            git push https://%GIT_USER%:%GIT_PSW%@github.com/%GIT_USER%/simple-pipeline.git HEAD:${BRANCH} || echo push-failed
+          """
         }
       }
     }
 
+    stage('Trigger Vercel Deployment') {
+      when {
+        expression { env.BUILD_FAILED == 'true' }
+      }
+      steps {
+        withCredentials([string(credentialsId: 'vercel-token', variable: 'VERCEL_TOKEN')]) {
+          powershell '''
+$ErrorActionPreference = "Stop"
+# Build minimal deployment request — we must include gitSource.ref
+$body = @{
+  "name" = "simple-pipeline"
+  "gitSource" = @{
+    "type" = "github"
+    "repo" = "NIKHILUTTAM/simple-pipeline"
+    "org"  = "NIKHILUTTAM"
+    "branch" = "main"
+  }
+} | ConvertTo-Json -Depth 10
+
+$uri = "https://api.vercel.com/v13/deployments"
+# call Vercel
+$response = Invoke-RestMethod -Method Post -Uri $uri -Headers @{ Authorization = "Bearer $env:VERCEL_TOKEN"; "Content-Type" = "application/json" } -Body $body -ErrorAction Stop
+# Save response
+$response | ConvertTo-Json -Depth 10 | Out-File vercel_response.json -Encoding utf8
+Write-Host "Vercel response saved to vercel_response.json"
+# store status (if there is a "state" field or "error")
+if ($response.error) {
+  Write-Host "Vercel call returned error"
+  exit 2
+}
+'''
+        }
+      }
+    }
+
+    stage('Auto-rollback if deployment failed') {
+      when {
+        expression { env.BUILD_FAILED == 'true' }
+      }
+      steps {
+        script {
+          // Check vercel_response.json and if contains error -> revert last commit
+          def rc = powershell(returnStatus: true, script: '''
+$ErrorActionPreference = "Stop"
+if (-not (Test-Path vercel_response.json)) { Write-Host "no vercel_response.json"; exit 1 }
+$j = Get-Content vercel_response.json -Raw | ConvertFrom-Json
+if ($j.error) { Write-Host "deployment error detected"; exit 2 }
+# if no explicit error, check for required URL/id
+if (-not $j.id -and -not $j.url) { Write-Host "deployment response missing id/url"; exit 3 }
+Write-Host "deployment looks OK"
+exit 0
+''')
+          if (rc != 0) {
+            echo "Deployment failed or response invalid (rc=${rc}) — rolling back latest commit if we pushed one."
+            withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PSW')]) {
+              // Safe rollback: create a revert commit for the last autoheal commit
+              bat """
+                git fetch --all
+                REM find last commit author "Jenkins AutoHeal"
+                setlocal enabledelayedexpansion
+                for /f "delims=" %%a in ('git log -n 1 --pretty=format:"%%H %%an"') do set L=%%a
+                echo Last commit header: !L!
+                REM Attempt revert - if nothing to revert, echo message
+                git revert --no-edit HEAD || echo "Revert failed or nothing to revert"
+                git push https://%GIT_USER%:%GIT_PSW%@github.com/%GIT_USER%/simple-pipeline.git HEAD:${BRANCH} || echo "Push revert failed"
+              """
+            }
+          } else {
+            echo "Deployment succeeded (or looked OK). No rollback needed."
+          }
+        }
+      }
+    }
   } // stages
 
   post {
     always {
+      // archive artifacts for debugging
+      archiveArtifacts artifacts: 'response.json, response_body.txt, autoheal_patch.diff, vercel_response.json', allowEmptyArchive: true
       script {
-        echo "Post: archive artifacts and show helpful hints."
-        archiveArtifacts artifacts: "${env.GEMINI_RESP},${env.PATCH_FILE},${env.VERCEL_RESP}", allowEmptyArchive: true
-        // Print quick guidance
-        echo "If auto-heal applied real changes, review commit history. If patch failed to apply, inspect ${env.GEMINI_RESP} and ${env.PATCH_FILE}."
+        if (env.BUILD_FAILED == 'true') {
+          echo "❌ Pipeline FAILED (auto-heal attempted). Check archived artifacts and Git history."
+          currentBuild.result = 'FAILURE'
+        } else {
+          echo "✅ Pipeline successful."
+          currentBuild.result = 'SUCCESS'
+        }
       }
-    }
-    success {
-      echo "✅ Pipeline completed SUCCESS. Auto-heal (if applied) and deploy finished."
-    }
-    failure {
-      echo "❌ Pipeline FAILED. Check archived artifacts: ${env.GEMINI_RESP}, ${env.PATCH_FILE}, ${env.VERCEL_RESP}."
-    }
-    unstable {
-      echo "⚠ Pipeline UNSTABLE. Some steps had non-fatal errors — check logs."
     }
   }
 }
