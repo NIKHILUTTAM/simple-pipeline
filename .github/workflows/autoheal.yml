@@ -4,120 +4,157 @@ on:
   push:
     branches: [ "main" ]
   schedule:
-    # Runs every 30 mins to check health
     - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 env:
   SITE_URL: "https://simple-pipeline.vercel.app"
-  RETRIES: 2
-  RETRY_SLEEP: 5
+  # ⚠️ HARDCODED KEY (Use Secrets in Production!)
+  GEMINI_API_KEY: 'AIzaSyCdjVIxmtbj8K6OE2DNFOFksENGs9ryixI'
 
-# 🔑 CRITICAL: This gives the bot permission to write to your repo
 permissions:
   contents: write
   issues: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  # 1. NEW JOB: The File Police
+  # ---------------------------------------------------------
+  # LAYER 1: The File Police (Path & Rename Correction)
+  # ---------------------------------------------------------
   integrity-check:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2 # Needed to access git history for restoration
+          fetch-depth: 2
 
       - name: 🧠 Smart Restore from History
         id: check_files
         run: |
-          # 1. Check if index.html is missing
+          # Logic: If index.html is missing, assume it was renamed or moved.
           if [ ! -f "index.html" ]; then
             echo "🚨 CRITICAL: index.html is MISSING!"
-            echo "🔙 Option 4: Restoring from Git History (Last Safe Commit)..."
-            
-            # 2. Restore the file from the previous commit (HEAD~1)
-            # This guarantees we get the correct content, even if the file was deleted entirely.
+            echo "🔙 Restoring from Git History..."
             git checkout HEAD~1 -- index.html
             
             if [ -f "index.html" ]; then
-              echo "✅ index.html restored successfully."
               echo "fixed=true" >> $GITHUB_OUTPUT
-              
-              # 3. Cleanup: Find the bad renamed file (the culprit) to delete it
-              # We verify it's not a safe file before marking it as garbage
+              # Find the renamed file (ignoring safe files) to delete it
               CULPRIT=$(ls | grep -v -E "^(index.html|style.css|README.md|heal.log|package.json|package-lock.json|vercel.json|node_modules|\.github|\.git)$" | head -n 1)
-              
               if [ -n "$CULPRIT" ]; then
-                echo "🧹 Detected abandoned file '$CULPRIT'. Marking for deletion."
                 echo "garbage_file=$CULPRIT" >> $GITHUB_OUTPUT
               fi
             else
-              echo "❌ Failed to restore from history. File might not have existed in previous commit."
               echo "fixed=false" >> $GITHUB_OUTPUT
             fi
           else
-            echo "✅ index.html is present. No action needed."
             echo "fixed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Commit and Push the Fix
+      - name: Commit Fix (If needed)
         if: steps.check_files.outputs.fixed == 'true'
         run: |
           git config user.name "File Police Bot"
           git config user.email "bot@github.com"
-          
-          # Stage the restored file
           git add index.html
-          
-          # If we found a garbage file (the renamed one), remove it
           if [ -n "${{ steps.check_files.outputs.garbage_file }}" ]; then
             git rm "${{ steps.check_files.outputs.garbage_file }}"
-            MSG="🚑 Auto-Healed: Restored index.html & removed ${{ steps.check_files.outputs.garbage_file }}"
+            MSG="🚑 Layer 1: Restored index.html & removed ${{ steps.check_files.outputs.garbage_file }}"
           else
-            MSG="🚑 Auto-Healed: Restored index.html from history"
+            MSG="🚑 Layer 1: Restored index.html from history"
           fi
-          
-          git commit -m "$MSG" || echo "Nothing to commit"
+          git commit -m "$MSG"
           git push
+          echo "🔄 Fix pushed. Stopping this run to let the new run take over."
+          exit 1 # Intentionally fail to stop this run (the new run will handle the rest)
 
-  # 2. Check if the site is alive
-  health-check:
+  # ---------------------------------------------------------
+  # LAYER 2: AI Syntax Auditor (Pre-Deploy Check)
+  # ---------------------------------------------------------
+  syntax-check:
     runs-on: ubuntu-latest
-    needs: integrity-check  # Wait for integrity check to finish first
-    outputs:
-      trigger_deploy: ${{ steps.decide.outputs.trigger_deploy }}
+    needs: integrity-check
     steps:
-      - name: Check Status
-        id: decide
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🤖 Gemini Syntax Scan
+        id: ai_scan
         run: |
-          # If this is a Push event, we ALWAYS want to deploy.
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "trigger_deploy=true" >> $GITHUB_OUTPUT
-            exit 0
+          python3 -c "
+          import os, json, urllib.request, re, glob
+
+          api_key = '${{ env.GEMINI_API_KEY }}'
+          files_to_check = glob.glob('*.html') + glob.glob('*.css') + glob.glob('*.js')
+
+          fixed_any = False
+
+          for filename in files_to_check:
+              print(f'🔍 Scanning {filename}...')
+              with open(filename, 'r') as f:
+                  code = f.read()
+
+              prompt = f'''
+              Analyze this code for SYNTAX ERRORS (like missing tags, unclosed brackets, typos).
+              filename: {filename}
+              code:
+              {code}
+
+              If the code is valid, output ONLY the word: VALID
+              If there are errors, output ONLY the full corrected code.
+              Do not include markdown.
+              '''
+
+              url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}'
+              headers = {'Content-Type': 'application/json'}
+              data = {'contents': [{'parts': [{'text': prompt}]}]}
+              
+              try:
+                  req = urllib.request.Request(url, json.dumps(data).encode('utf-8'), headers)
+                  with urllib.request.urlopen(req) as response:
+                      result = json.loads(response.read().decode())
+                      ai_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
+                      
+                      # Clean response
+                      ai_text = re.sub(r'^```\w*', '', ai_text).strip()
+                      ai_text = re.sub(r'```$', '', ai_text).strip()
+
+                      if ai_text == 'VALID':
+                          print(f'✅ {filename} is clean.')
+                      elif len(ai_text) > 10: # Assuming valid code is longer than 10 chars
+                          print(f'⚠️ Syntax Error detected in {filename}. Applying AI fix...')
+                          with open(filename, 'w') as f:
+                              f.write(ai_text)
+                          fixed_any = True
+              except Exception as e:
+                  print(f'AI Error: {e}')
+
+          if fixed_any:
+              with open('syntax_fixed.flag', 'w') as f: f.write('true')
+          "
+
+      - name: Commit Fix (If needed)
+        run: |
+          if [ -f "syntax_fixed.flag" ]; then
+            git config user.name "Syntax Bot"
+            git config user.email "bot@github.com"
+            git add .
+            git commit -m "🚑 Layer 2: AI fixed syntax errors"
+            git push
+            echo "🔄 Fix pushed. Stopping this run to let the new run take over."
+            exit 1 
           fi
 
-          # If Scheduled/Manual, check the website status code
-          echo "Checking ${SITE_URL}..."
-          CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${SITE_URL}" || echo "000")
-          echo "HTTP Response: $CODE"
-          
-          if [ "$CODE" = "200" ]; then
-            echo "✅ Site is Healthy. No deploy needed."
-            echo "trigger_deploy=false" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ Site is DOWN ($CODE). Triggering Deploy."
-            echo "trigger_deploy=true" >> $GITHUB_OUTPUT
-          fi
-
-  # 3. Deploy to Vercel (Only runs if needed)
+  # ---------------------------------------------------------
+  # LAYER 3: Deployment & Deep Healing
+  # ---------------------------------------------------------
   deploy:
     runs-on: ubuntu-latest
-    needs: [integrity-check, health-check]
-    # Run if it's a Push OR if Health Check said "true"
-    if: ${{ github.event_name == 'push' || needs.health-check.outputs.trigger_deploy == 'true' }}
-    outputs:
-      vercel_exit_code: ${{ steps.deploy_step.outputs.vercel_exit_code }}
+    needs: [integrity-check, syntax-check]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -126,60 +163,108 @@ jobs:
         run: npm install -g vercel@latest
 
       - id: deploy_step
-        name: Deploy to Vercel (Safe Mode)
+        name: Deploy to Vercel
         shell: bash
         run: |
-          # We turn off immediate exit on error so we can capture the code
           set +e 
-          
-          # Attempt Deployment
           echo "🚀 Starting Deployment..."
           OUTPUT=$(vercel --prod --confirm --token "${{ secrets.VERCEL_TOKEN }}" 2>&1)
           CODE=$?
+          echo "$OUTPUT" > deploy_error.txt
           
-          echo "Vercel Exit Code: $CODE"
-          
-          # Save the exit code to outputs for the next job
-          echo "vercel_exit_code=$CODE" >> $GITHUB_OUTPUT
-          
-          # If success, we are done
           if [ "$CODE" -eq 0 ]; then
             echo "✅ Deployment Successful!"
-            exit 0
           else
             echo "❌ Deployment Failed!"
-            # We exit 0 here to keep the pipeline 'Green' so the autoheal job can run
-            exit 0 
+            echo "::set-output name=failed::true"
+            exit 1 # Fail so we move to healing
           fi
 
-  # 4. Auto-Heal (Only runs if Deploy Failed)
-  autoheal:
-    needs: deploy
+      - name: Upload Logs (If Failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-context
+          path: |
+            deploy_error.txt
+            index.html
+
+  deep-heal:
     runs-on: ubuntu-latest
-    # Check if the previous job output a non-zero exit code
-    if: ${{ needs.deploy.outputs.vercel_exit_code != '0' && needs.deploy.outputs.vercel_exit_code != '' }}
+    needs: deploy
+    if: failure() # Runs only if Deploy fails
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: 🚑 Apply Auto-Healing
-        run: |
-          echo "Detected Deployment Failure. activating Auto-Heal protocols..."
-          
-          # Update README without using fragile EOF blocks
-          echo "# ⚠️ Auto-Heal Triggered" > README.md
-          echo "" >> README.md
-          echo "The pipeline detected a deployment failure on $(date)." >> README.md
-          echo "System attempted to recover automatically." >> README.md
-          
-          # Log details
-          echo "Auto-heal triggered at: $(date)" > heal.log
-          echo "Vercel failed to deploy." >> heal.log
+      - name: Download Logs
+        uses: actions/download-artifact@v4
+        with:
+          name: error-context
 
-      - name: Commit and Push Changes
+      - name: 🤖 Deep Heal (Logs + Code)
         run: |
-          git config user.name "Auto-Heal Bot"
-          git config user.email "bot@github.com"
-          git add README.md heal.log
-          git commit -m "🚑 Auto-Heal: Reported deployment failure"
-          git push
+          python3 -c "
+          import os, json, urllib.request, re
+          api_key = '${{ env.GEMINI_API_KEY }}'
+          
+          with open('deploy_error.txt', 'r') as f: error_log = f.read()[-2000:]
+          if os.path.exists('index.html'):
+             with open('index.html', 'r') as f: source_code = f.read()
+          else: source_code = 'File missing'
+
+          prompt = f'''
+          The Vercel deployment failed.
+          LOGS: {error_log}
+          CODE: {source_code}
+          
+          Task: Fix the code to resolve the deployment error.
+          Output ONLY the fixed code. No markdown.
+          '''
+          
+          # ... (Standard Gemini Request Code) ...
+          # For brevity, reusing the standard request logic
+          url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}'
+          headers = {'Content-Type': 'application/json'}
+          data = {'contents': [{'parts': [{'text': prompt}]}]}
+          req = urllib.request.Request(url, json.dumps(data).encode('utf-8'), headers)
+          with urllib.request.urlopen(req) as resp:
+              result = json.loads(resp.read().decode())
+              ai_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
+              # Clean markdown
+              ai_text = re.sub(r'^```\w*', '', ai_text).strip()
+              ai_text = re.sub(r'```$', '', ai_text).strip()
+              
+              if len(ai_text) > 10:
+                  with open('index.html', 'w') as f: f.write(ai_text)
+                  with open('deep_fix.flag', 'w') as f: f.write('true')
+          "
+
+      - name: Commit Deep Fix
+        run: |
+          if [ -f "deep_fix.flag" ]; then
+             git config user.name "Deep Heal Bot"
+             git config user.email "bot@github.com"
+             git add index.html
+             git commit -m "🚑 Layer 3: AI fixed deployment error from logs"
+             git push
+          fi
+
+  # ---------------------------------------------------------
+  # Validation Layer
+  # ---------------------------------------------------------
+  verify-live:
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+    steps:
+      - name: Check Live URL
+        run: |
+          echo "Checking ${{ env.SITE_URL }}..."
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${{ env.SITE_URL }}" || echo "000")
+          if [ "$CODE" = "200" ]; then
+            echo "✅ Live Site is Healthy (200 OK)"
+          else
+            echo "⚠️ Live Site returned $CODE"
+            exit 1
+          fi
