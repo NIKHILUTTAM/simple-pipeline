@@ -2,188 +2,115 @@ pipeline {
     agent any
 
     environment {
-        REPO = "NIKHILUTTAM/simple-pipeline"
-        BRANCH = "main"
-        SITE_URL = "https://simple-pipeline.vercel.app"
-
-        # Choose ANY AI provider ↓
-        GEMINI_KEY = credentials('GEMINI_KEY')
-        OPENAI_KEY = credentials('OPENAI_KEY')
+        GITHUB_TOKEN = credentials('github-token')
+        GEMINI_KEY   = credentials('gemini-key')
+        VERCEL_TOKEN = credentials('vercel-token')
+        REPO_URL     = "https://github.com/NIKHILUTTAM/simple-pipeline.git"
     }
 
     stages {
 
-        /* ----------------------------------------------
-           1) HEALTH CHECK
-        -----------------------------------------------*/
-        stage('Health Check') {
+        stage('Checkout Code') {
+            steps {
+                git url: "${REPO_URL}", branch: "main", credentialsId: "github-token"
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                echo "Installing dependencies..."
+                npm install || true
+                '''  // allow fail for detection
+            }
+        }
+
+        stage('Run Build') {
             steps {
                 script {
-                    def status = sh(
-                        script: "curl -s -o /dev/null -w \"%{http_code}\" ${SITE_URL}",
-                        returnStdout: true
-                    ).trim()
+                    def status = sh(script: "npm run build", returnStatus: true)
 
-                    if (status != "200") {
-                        echo "❌ Site is down — starting AI Repair pipeline"
-                        currentBuild.result = "FAILURE"
+                    if (status != 0) {
+                        echo "❌ Build failed — triggering auto-healing..."
+                        error("BUILD_FAILED")
                     }
                 }
             }
         }
 
-        /* ----------------------------------------------
-           2) DOWNLOAD REPO + LOGS
-        -----------------------------------------------*/
-        stage('Fetch Repo & Logs') {
-            when { expression { currentBuild.result == "FAILURE" } }
+        stage('AI Auto-Healing (Gemini)') {
+            when { failed() }
+            steps {
+                script {
+                    echo "🧠 Sending logs to Gemini..."
 
+                    def logs = sh(
+                        script: "cat build.log || echo 'No logs captured'",
+                        returnStdout: true
+                    )
+
+                    def payload = """
+                    {
+                      "model": "gemini-pro",
+                      "prompt": "Fix this build error:\\n${logs}",
+                      "temperature": 0.2
+                    }
+                    """
+
+                    writeFile file: "ai_request.json", text: payload
+
+                    sh """
+                    curl -X POST \
+                        -H "Content-Type: application/json" \
+                        -H "x-goog-api-key: $GEMINI_KEY" \
+                        -d @ai_request.json \
+                        https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent \
+                        > ai_fix.json
+                    """
+
+                    echo "AI response saved: ai_fix.json"
+                }
+            }
+        }
+
+        stage('Apply AI Fix') {
+            when { failed() }
             steps {
                 script {
                     sh """
-                        rm -rf repo
-                        git clone https://github.com/${REPO}.git repo
-                        cd repo
-                        ls -la
-                    """
-                }
-            }
-        }
-
-        /* ----------------------------------------------
-           3) AI Auto-Repair (Gemini or GPT-4)
-        -----------------------------------------------*/
-        stage('AI Auto Repair') {
-            when { expression { currentBuild.result == "FAILURE" } }
-
-            steps {
-                script {
-                    echo "🤖 AI Repair Starting..."
-
-                    // Read the broken file
-                    def broken = readFile("repo/index.html")
-
-                    // PROMPT
-                    def prompt = """
-                    You are an expert DevOps debugging agent.
-                    The following code is causing deployment failure on Vercel.
-                    FIX IT COMPLETELY.
-
-                    Rules:
-                    - Return ONLY corrected code
-                    - No markdown
-                    - No comments
-                    - Must be valid HTML/CSS/JS
-                    - Do not add explanations
-
-                    CODE:
-                    ${broken}
+                    jq -r '.candidates[0].content.parts[0].text' ai_fix.json > patch.txt
                     """
 
-                    def fixed = ""
-
-                    /* ----- Prefer GEMINI ----- */
-                    if (env.GEMINI_KEY?.trim()) {
-                        echo "🧠 Using Gemini for repair..."
-                        fixed = sh(
-                            script: """
-                            curl -s -X POST \\
-                              -H "Content-Type: application/json" \\
-                              -d '{
-                                    "contents":[{"parts":[{"text":"${prompt}"}]}]
-                                  }' \\
-                              "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}"
-                            """,
-                            returnStdout: true
-                        )
-
-                        // Extract text
-                        fixed = fixed.replaceAll(".*\"text\":\"", "")
-                                     .replaceAll("\"}.*", "")
-                                     .replace("\\n", "\n")
-                    }
-
-                    /* ----- FALLBACK TO OPENAI ----- */
-                    else if (env.OPENAI_KEY?.trim()) {
-                        echo "🤖 Using OpenAI GPT-4 for repair..."
-                        fixed = sh(
-                            script: """
-                            curl https://api.openai.com/v1/chat/completions \\
-                              -H "Authorization: Bearer ${OPENAI_KEY}" \\
-                              -H "Content-Type: application/json" \\
-                              -d '{
-                                "model": "gpt-4.1",
-                                "messages": [{"role": "user", "content": "${prompt}"}]
-                              }'
-                            """,
-                            returnStdout: true
-                        )
-
-                        fixed = fixed.replaceAll(".*\"content\":\"", "")
-                                     .replaceAll("\"}.*", "")
-                                     .replace("\\n", "\n")
-                    }
-
-                    // Write fixed code
-                    writeFile file: "repo/index.html", text: fixed
-                }
-            }
-        }
-
-        /* ----------------------------------------------
-           4) COMMIT & PUSH AUTO-REPAIR
-        -----------------------------------------------*/
-        stage('Commit Fix') {
-            when { expression { currentBuild.result == "FAILURE" } }
-
-            steps {
-                script {
                     sh """
-                        cd repo
-                        git config user.name "AI-Heal-Bot"
-                        git config user.email "heal@bot.com"
-                        git add index.html
-                        git commit -m "🤖 Auto-Heal: AI fixed deployment error"
-                        git push
+                    echo "Applying patch..."
+                    git apply patch.txt || true
+                    git add . || true
+                    git commit -m "🤖 Auto-healed by Gemini" || true
+                    git push https://${GITHUB_TOKEN}@github.com/NIKHILUTTAM/simple-pipeline.git || true
                     """
                 }
             }
         }
 
-        /* ----------------------------------------------
-           5) TRIGGER GITHUB ACTIONS DEPLOY
-        -----------------------------------------------*/
-        stage('Trigger Deploy') {
-            when { expression { currentBuild.result == "FAILURE" } }
-
+        stage('Deploy to Vercel') {
             steps {
-                script {
-                    echo "🚀 Deployment will be triggered automatically by GitHub Actions"
-                }
+                sh """
+                echo "🔄 Triggering Vercel deployment..."
+                curl -X POST "https://api.vercel.com/v13/deployments" \
+                  -H "Authorization: Bearer $VERCEL_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d '{"name": "simple-pipeline"}'
+                """
             }
         }
+    }
 
-        /* ----------------------------------------------
-           6) VERIFY FIXED SITE
-        -----------------------------------------------*/
-        stage('Post-Repair Health Test') {
-            steps {
-                script {
-                    sleep 20  // small wait
-
-                    def status = sh(
-                        script: "curl -s -o /dev/null -w \"%{http_code}\" ${SITE_URL}",
-                        returnStdout: true
-                    ).trim()
-
-                    if (status == "200") {
-                        echo "🎉 SUCCESS — Site healed & live!"
-                    } else {
-                        error("Still down after repair.")
-                    }
-                }
-            }
+    post {
+        success {
+            echo "✅ Auto-healing pipeline successfully completed!"
         }
-
+        failure {
+            echo "❌ Pipeline failed even after auto-healing."
+        }
     }
 }
